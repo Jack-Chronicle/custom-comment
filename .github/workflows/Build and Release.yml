@@ -56,7 +56,7 @@ jobs:
           else
             NEW_VER=$(node -p "require('./package.json').version")
           fi
-          echo "new_version=v$NEW_VER" >> $GITHUB_OUTPUT
+          echo "new_version=$NEW_VER" >> $GITHUB_OUTPUT
 
       - run: npm ci
       - run: npm run build
