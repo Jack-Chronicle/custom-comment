@@ -33,7 +33,12 @@ jobs:
             echo "version_changed=false" >> $GITHUB_OUTPUT
           fi
 
-      # 2. Conditionally bump patch version or just get the current one
+      # 2. Add Access Token to allow github-actions[bot] to change repo files
+      - name: Set up PAT for pushing to repo
+        run: |
+          git remote set-url origin https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository }}.git
+
+      # 3. Conditionally bump patch version or just get the current one
       - name: Bump patch version if needed & output version for later jobs
         id: set_version
         run: |
