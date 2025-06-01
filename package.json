@@ -8,8 +8,7 @@
   "main": "main.js",
   "scripts": {
     "build": "node esbuild.config.js",
-    "dev": "node esbuild.config.js --watch",
-    "release": "npm version patch && git push && git push --tags"
+    "dev": "node esbuild.config.js --watch"
   },
   "devDependencies": {
     "esbuild": "^0.25.5",

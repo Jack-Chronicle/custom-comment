@@ -9,14 +9,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Use Node.js 22.x
-        # Using Node.js 22.x as specified in the plugin's package.json
+
+      - name: Use Node.js 20
         uses: actions/setup-node@v4
         with:
-          node-version: 22.x
+          node-version: 20
           cache: 'npm'
+
+      - name: Set version in package.json from release tag
+        run: |
+          TAG_VERSION=${GITHUB_REF#refs/tags/v}
+          echo "Setting package.json version to $TAG_VERSION"
+          npm version --no-git-tag-version $TAG_VERSION
+
       - run: npm ci
       - run: npm run build
+
       - name: Upload plugin files
         uses: actions/upload-artifact@v4
         with:
@@ -25,6 +33,16 @@ jobs:
             main.js
             manifest.json
             styles.css
+
+      # (Optional) Push the version bump commit back to the repo
+      - name: Commit version bump
+        run: |
+          git config --global user.name 'GitHub Actions'
+          git config --global user.email 'actions@github.com'
+          git add package.json package-lock.json
+          git commit -m "chore: bump version to ${{ github.ref_name }}"
+          git push
+        if: github.ref_type == 'tag'
 
   upload_release:
     needs: build
@@ -36,6 +54,7 @@ jobs:
         with:
           name: obsidian-plugin-build
           path: ./release
+
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
