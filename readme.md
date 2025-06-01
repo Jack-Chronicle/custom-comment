@@ -12,10 +12,17 @@ Lets you customize your comment syntax/formats in Obsidian.
 
 ## Installation
 
+### Manual Installation
+
 1. Clone or download this repository.
 2. Run `npm install` to install dependencies.
 3. Build the plugin: `npm run build`
 4. Copy `main.js`, `manifest.json` to your Obsidian vault's `.obsidian/plugins/custom-comment` folder.
+
+### Community Plugins
+
+- Currently Working on apporval
+Open the Community Plugins tab in the settings and search for "Custom Comments"
 
 ## Usage
 
