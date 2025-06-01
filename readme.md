@@ -22,7 +22,7 @@ Lets you customize your comment syntax/formats in Obsidian.
 ### Community Plugins
 
 - Currently Working on apporval
-Open the Community Plugins tab in the settings and search for "Custom Comments"
+<!-- Open the Community Plugins tab in the settings and search for "Custom Comments" -->
 
 ## Usage
 
