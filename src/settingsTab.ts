@@ -1,3 +1,11 @@
+/**
+ * Settings tab for the Custom Comments plugin.
+ *
+ * This class creates the settings UI in Obsidian's settings panel, allowing users to customize their comment template.
+ *
+ * @class CommentFormatSettingTab
+ * @extends PluginSettingTab
+ */
 import { App, PluginSettingTab, Setting } from "obsidian";
 import CommentFormatPlugin from "./main";
 
