@@ -1,6 +1,6 @@
 {
   "name": "custom-comment",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Lets you customize your comment syntax/formats.",
   "author": "Jack Chronicle",
   "type": "module",
