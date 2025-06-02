@@ -5,7 +5,7 @@
   "author": "Jack Chronicle",
   "type": "module",
   "license": "MIT",
-  "main": "main.js",
+  "main": "dist/main.js",
   "scripts": {
     "build": "node esbuild.config.js",
     "dev": "node esbuild.config.js --watch"
