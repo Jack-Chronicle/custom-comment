@@ -1,9 +1,20 @@
+/**
+ * Main entry point for the Custom Comments Obsidian plugin.
+ *
+ * This plugin allows users to insert customizable comment templates into their notes.
+ * Users can define their own comment format using `{cursor}` as a placeholder for the cursor position.
+ *
+ * @packageDocumentation
+ */
 import { Plugin, Editor } from "obsidian";
 import { CommentFormatSettings, DEFAULT_SETTINGS } from "./settingsData";
 import { CommentFormatSettingTab } from "./settingsTab";
 
 export default class CommentFormatPlugin extends Plugin {
-    settings: CommentFormatSettings;
+    /**
+     * Plugin settings, loaded on initialization.
+     */
+    settings!: CommentFormatSettings;
 
     async onload() {
         await this.loadSettings();
