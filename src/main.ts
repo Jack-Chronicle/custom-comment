@@ -436,6 +436,24 @@ export default class CommentFormatPlugin extends Plugin {
             // Cursor
             startIdx = searchMarkerInLine(normStart, cursor.ch, 'back');
             endIdx = searchMarkerInLine(normEnd, cursor.ch, 'forward');
+            // --- Enhanced: Check if cursor is adjacent to any marker character ---
+            if (startIdx === -1 && endIdx === -1 && normStart && normEnd) {
+                // ...existing code...
+            }
+            // --- NEW: If text is empty (no selection/word), check if cursor is inside a comment region in the full line ---
+            if (!selection && !wordBounds && !text.trim() && normStart && normEnd) {
+                const fullStartIdx = line.indexOf(normStart);
+                const fullEndIdx = normEnd ? line.lastIndexOf(normEnd) : -1;
+                if (
+                    fullStartIdx !== -1 &&
+                    fullEndIdx !== -1 &&
+                    cursor.ch >= fullStartIdx + normStart.length &&
+                    cursor.ch <= fullEndIdx + normEnd.length
+                ) {
+                    startIdx = fullStartIdx;
+                    endIdx = fullEndIdx;
+                }
+            }
         }
 
         // After detection, log the final indices and region
@@ -476,28 +494,52 @@ export default class CommentFormatPlugin extends Plugin {
             let beforeRegion = line.slice(0, startIdx);
             let afterRegion = line.slice((usedEnd && endIdx !== -1 ? endIdx + usedEnd.length : line.length));
             // Remove a single space after the start marker if present
-            if (region.startsWith(' ')) region = region.slice(1);
+            let startMarkerExtra = 0;
+            if (region.startsWith(' ')) {
+                region = region.slice(1);
+                startMarkerExtra = 1;
+            }
             // Remove a single space before the end marker if present
-            if (region.endsWith(' ')) region = region.slice(0, -1);
+            let endMarkerExtra = 0;
+            if (region.endsWith(' ')) {
+                region = region.slice(0, -1);
+                endMarkerExtra = 1;
+            }
             let newLine = beforeRegion + region + afterRegion;
             editor.setLine(cursor.line, newLine);
             // 6. Cursor Management (restore relative position)
-            let removedBefore = 0;
             if (selection) {
-                const unclamped = beforeRegion.length;
-                const selFrom = { line: cursor.line, ch: unclamped };
-                const selTo = { line: cursor.line, ch: unclamped + region.length };
+                // If the selection included any part of the start or end marker, shrink it to exclude them
+                let selFromCh = from.ch;
+                let selToCh = to.ch;
+                // If selection starts before or at the start marker, move to after marker
+                if (from.ch <= startIdx + usedStart.length + startMarkerExtra) {
+                    selFromCh = startIdx;
+                } else {
+                    selFromCh = from.ch - usedStart.length - startMarkerExtra;
+                }
+                // If selection ends after or at the end marker, move to before marker
+                if (usedEnd && endIdx !== -1 && to.ch >= endIdx) {
+                    selToCh = startIdx + region.length;
+                } else {
+                    selToCh = to.ch - usedStart.length - startMarkerExtra;
+                }
+                // Clamp
+                selFromCh = Math.max(0, selFromCh);
+                selToCh = Math.max(selFromCh, selToCh);
+                const selFrom = { line: cursor.line, ch: selFromCh };
+                const selTo = { line: cursor.line, ch: selToCh };
                 editor.setSelection(selFrom, selTo);
             } else if (wordBounds) {
-                const unclamped = beforeRegion.length;
-                editor.setCursor({ line: cursor.line, ch: unclamped });
+                // Select the word region after uncommenting
+                const selFrom = { line: cursor.line, ch: beforeRegion.length };
+                const selTo = { line: cursor.line, ch: beforeRegion.length + region.length };
+                editor.setSelection(selFrom, selTo);
             } else {
-                // Cursor: restore relative position
-                // Calculate how many chars were removed before the original cursor
-                removedBefore = (cursor.ch > startIdx ? Math.min(cursor.ch, startIdx + usedStart.length) - startIdx : 0) + usedStart.length;
-                let newCh = cursor.ch - removedBefore;
-                if (newCh < beforeRegion.length) newCh = beforeRegion.length;
-                editor.setCursor({ line: cursor.line, ch: newCh });
+                // Cursor: select the uncommented text (region)
+                const selFrom = { line: cursor.line, ch: beforeRegion.length };
+                const selTo = { line: cursor.line, ch: beforeRegion.length + region.length };
+                editor.setSelection(selFrom, selTo);
             }
             logDev('Uncommented region', { from, to, region });
         } else {
@@ -510,8 +552,10 @@ export default class CommentFormatPlugin extends Plugin {
                 commented = usedStart + (innerText ? ' ' : '') + innerText + (innerText ? ' ' : '') + usedEnd;
                 newLine = line.slice(0, from.ch) + commented + line.slice(to.ch);
                 editor.setLine(cursor.line, newLine);
-                const selFrom = { line: cursor.line, ch: from.ch + usedStart.length + (innerText ? 1 : 0) };
-                const selTo = { line: cursor.line, ch: from.ch + usedStart.length + (innerText ? 1 : 0) + innerText.length };
+                // Select the same region relative to the commented text
+                const startMarkerLen = usedStart.length + (innerText ? 1 : 0);
+                const selFrom = { line: cursor.line, ch: from.ch + startMarkerLen };
+                const selTo = { line: cursor.line, ch: from.ch + startMarkerLen + innerText.length };
                 editor.setSelection(selFrom, selTo);
             } else if (wordBounds && this.settings.wordOnlyMode) {
                 // Word only mode: treat word as selection (add spaces around word)
@@ -538,6 +582,7 @@ export default class CommentFormatPlugin extends Plugin {
             }
             logDev('Commented region', { from, to, commented });
         }
+
         // 6. Clamp cursor to valid position
         function clampCursorPos(pos: { line: number, ch: number }): { line: number, ch: number } {
             const allLines = editor.getValue().split('\n');
@@ -573,7 +618,8 @@ export default class CommentFormatPlugin extends Plugin {
         let endIdx = markerEnd ? line.lastIndexOf(markerEnd) : -1;
         let isInside = false;
         if (markerStart && markerEnd) {
-            isInside = startIdx !== -1 && endIdx !== -1 && cursor.ch >= startIdx + markerStart.length && cursor.ch <= endIdx;
+            // Fix: allow cursor to be anywhere between start marker end and end marker end
+            isInside = startIdx !== -1 && endIdx !== -1 && cursor.ch >= startIdx + markerStart.length && cursor.ch <= endIdx + markerEnd.length;
         } else if (markerStart) {
             isInside = startIdx !== -1 && cursor.ch >= startIdx + markerStart.length;
         }
