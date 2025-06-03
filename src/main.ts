@@ -26,21 +26,85 @@ function logDev(...args: any[]) {
     }
 }
 
+// Default styles for fallback removal
+const defaultStyles = [
+    { start: "%%", end: "%%" },
+    { start: "<!--", end: "-->" },
+    { start: "//", end: "" },
+];
+
 export default class CommentFormatPlugin extends Plugin {
     /**
      * Plugin settings, loaded on initialization.
      */
     settings!: CommentFormatSettings & { wordOnlyMode?: boolean };
+    private _markerCommandIds: string[] = [];
 
     async onload() {
         await this.loadSettings();
         this.addSettingTab(new CommentFormatSettingTab(this.app, this));
 
+        // Register the reload marker commands command
         this.addCommand({
-            id: "toggle-comment-template",
-            name: "Toggle Comment",
+            id: "reload-marker-commands",
+            name: "Reload Marker Commands",
+            callback: () => this.registerMarkerCommands(true)
+        });
+
+        // Register all marker commands (main + enabled additional marker sets)
+        this.registerMarkerCommands();
+        // Post processor removed as requested.
+    }
+
+    /**
+     * Register all marker commands (main + enabled additional marker sets). If force is true, re-registers all.
+     */
+    registerMarkerCommands(force = false) {
+        // Remove previously registered marker commands if force is true
+        if (force && this._markerCommandIds) {
+            // Do NOT remove commands dynamically; just clear our tracking array
+            this._markerCommandIds = [];
+        }
+        this._markerCommandIds = [];
+
+        // Main command: always present, always visible, always named 'Toggle Comment: (%%|%%)'
+        const mainTemplate = this.settings.template ?? "%% {cursor} %%";
+        const cursorIndex = mainTemplate.indexOf("{cursor}");
+        let before = "%%";
+        let after = "%%";
+        if (cursorIndex !== -1) {
+            before = mainTemplate.slice(0, cursorIndex).trim() || "%%";
+            after = mainTemplate.slice(cursorIndex + "{cursor}".length).trim() || "%%";
+        }
+        const mainId = "toggle-comment-template";
+        this.addCommand({
+            id: mainId,
+            name: `Toggle Comment: (${before}|${after})`,
             editorCallback: (editor: Editor) => this.toggleComment(editor)
         });
+        this._markerCommandIds.push(mainId);
+
+        // Only register marker commands for marker sets that exist and are enabled
+        if (Array.isArray(this.settings.additionalMarkers)) {
+            this.settings.additionalMarkers.forEach((marker, i) => {
+                if (marker && marker.registerCommand) {
+                    const id = `toggle-comment-marker-set-${i + 1}`;
+                    this.addCommand({
+                        id,
+                        name: (() => {
+                            const start = marker.start?.trim() || "%%";
+                            const end = marker.end?.trim() || "%%";
+                            return `Toggle Marker ${i + 1}: (${start}|${end})`;
+                        })(),
+                        checkCallback: (checking: boolean, editor?: Editor) => {
+                            if (!checking && editor) this.toggleComment(editor, marker);
+                            return true;
+                        }
+                    });
+                    this._markerCommandIds.push(id);
+                }
+            });
+        }
     }
 
     async loadSettings() {
@@ -49,6 +113,17 @@ export default class CommentFormatPlugin extends Plugin {
 
     async saveSettings() {
         await this.saveData(this.settings);
+    }
+
+    /**
+     * Reloads the plugin (disable, then enable) using the Obsidian API.
+     * Can be called from settings UI to refresh commands after marker set changes.
+     */
+    async reloadPlugin() {
+        // @ts-ignore
+        await this.app.plugins.disablePlugin(this.manifest.id);
+        // @ts-ignore
+        await this.app.plugins.enablePlugin(this.manifest.id);
     }
 
     insertComment(editor: Editor) {
@@ -79,8 +154,13 @@ export default class CommentFormatPlugin extends Plugin {
         });
     }
 
-    toggleComment(editor: Editor) {
-        logDev('toggleComment called', { selection: editor.getSelection(), cursor: editor.getCursor() });
+    /**
+     * Toggle comment using a specific marker set, or the default template if none provided.
+     * @param editor Obsidian editor
+     * @param markerSet Optional marker set { start: string; end: string }
+     */
+    toggleComment(editor: Editor, markerSet?: { start: string; end: string }) {
+        logDev('toggleComment called', { selection: editor.getSelection(), cursor: editor.getCursor(), markerSet });
         // --- Clamp helper ---
         function clampCursorPos(pos: { line: number, ch: number }): { line: number, ch: number } {
             const allLines = editor.getValue().split('\n');
@@ -88,21 +168,22 @@ export default class CommentFormatPlugin extends Plugin {
             let ch = Math.max(0, Math.min(pos.ch, allLines[line]?.length ?? 0));
             return { line, ch };
         }
-        const template = this.settings.template;
-        const cursorIndex = template.indexOf("{cursor}");
-        let before = template;
-        let after = "";
-        if (cursorIndex !== -1) {
-            before = template.slice(0, cursorIndex);
-            after = template.slice(cursorIndex + "{cursor}".length);
+        let markerStart: string, markerEnd: string;
+        if (markerSet) {
+            markerStart = markerSet.start;
+            markerEnd = markerSet.end;
+        } else {
+            const template = this.settings.template;
+            const cursorIndex = template.indexOf("{cursor}");
+            let before = template;
+            let after = "";
+            if (cursorIndex !== -1) {
+                before = template.slice(0, cursorIndex);
+                after = template.slice(cursorIndex + "{cursor}".length);
+            }
+            markerStart = before;
+            markerEnd = after;
         }
-        const markerStart = before;
-        const markerEnd = after;
-        const defaultStyles = [
-            { start: "%%", end: "%%" },
-            { start: "<!--", end: "-->" },
-            { start: "//", end: "" },
-        ];
         const selection = editor.getSelection();
         const cursor = editor.getCursor();
         let text: string;
@@ -264,8 +345,8 @@ export default class CommentFormatPlugin extends Plugin {
         // Remove block comment logic (findBlockCommentBounds) as it is not needed for the new comment detection
         // Check if selection or word/line is inside a comment (custom or default)
         // --- Removal takes priority ---
-        let removalUsedStart = before;
-        let removalUsedEnd = after;
+        let removalUsedStart = markerStart;
+        let removalUsedEnd = markerEnd;
         let removalInside = false;
         let removalCheckText = text;
         if (selection) {
