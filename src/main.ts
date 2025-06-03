@@ -174,20 +174,12 @@ export default class CommentFormatPlugin extends Plugin {
      */
     toggleComment(editor: Editor, markerSet?: { start: string; end: string }) {
         logDev('toggleComment called', { selection: editor.getSelection(), cursor: editor.getCursor(), markerSet });
-        // --- Clamp helper ---
-        function clampCursorPos(pos: { line: number, ch: number }): { line: number, ch: number } {
-            const allLines = editor.getValue().split('\n');
-            let line = Math.max(0, Math.min(pos.line, allLines.length - 1));
-            let ch = Math.max(0, Math.min(pos.ch, allLines[line]?.length ?? 0));
-            return { line, ch };
-        }
+
+        // 1. Marker Extraction and Normalization
         let markerStart: string, markerEnd: string;
-        let markerStartNormalized: string, markerEndNormalized: string;
         if (markerSet) {
             markerStart = markerSet.start.trim();
             markerEnd = markerSet.end.trim();
-            markerStartNormalized = markerSet.start.endsWith(' ')? markerSet.start : markerSet.start + ' ';
-            markerEndNormalized = markerSet.end.startsWith(' ')? markerSet.end : ' ' + markerSet.end;
         } else {
             const template = this.settings.template;
             const cursorIndex = template.indexOf("{cursor}");
@@ -199,16 +191,43 @@ export default class CommentFormatPlugin extends Plugin {
             }
             markerStart = before.trim();
             markerEnd = after.trim();
-            markerStartNormalized = markerStart + (markerStart && !markerStart.endsWith(' ')? ' ' : '');
-            markerEndNormalized = (markerEnd && !markerEnd.startsWith(' ')? ' ' : '') + markerEnd;
         }
+        function normalize(str: string) {
+            return str.replace(/\s+/g, ' ').trim();
+        }
+        const normStart = normalize(markerStart);
+        const normEnd = normalize(markerEnd);
+
+        // 2. Efficient Comment Detection
+        function isRegionCommented(text: string, start: string, end: string) {
+            const trimmed = text.trim();
+            if (start && end) {
+                return trimmed.startsWith(start) && trimmed.endsWith(end);
+            } else if (start) {
+                return trimmed.startsWith(start);
+            }
+            return false;
+        }
+        // fallback style detection
+        function detectFallback(text: string) {
+            for (const style of defaultStyles) {
+                const s = normalize(style.start);
+                const e = normalize(style.end);
+                if (isRegionCommented(text, s, e)) {
+                    return { found: true, markerStart: style.start, markerEnd: style.end };
+                }
+            }
+            return { found: false };
+        }
+
+        // 3. Mode Decision
         const selection = editor.getSelection();
         const cursor = editor.getCursor();
-        let text: string;
         let from = editor.getCursor("from");
         let to = editor.getCursor("to");
-        let wordBounds: { start: number, end: number } | null = null;
         let line = editor.getLine(cursor.line);
+        let text: string;
+        let wordBounds: { start: number, end: number } | null = null;
         function getWordBounds(line: string, ch: number): { start: number, end: number } | null {
             const regex = /[\p{L}\p{N}_]+/gu;
             let match;
@@ -219,493 +238,183 @@ export default class CommentFormatPlugin extends Plugin {
             }
             return null;
         }
-        function isTextCommentedExact(str: string, start: string, end: string) {
-            if (!start) return false;
-            if (end) {
-                return str.startsWith(start) && str.endsWith(end);
-            } else {
-                return str.startsWith(start);
-            }
-        }
-        function scanForFirst(lines: string[], fromLine: number, fromCh: number, marker: string, opposite: string, direction: 'back' | 'forward'): { type: 'marker' | 'opposite' | null, pos: { line: number, ch: number } | null } {
-            const markerTrim = marker.trim();
-            const oppositeTrim = opposite.trim();
-            if (direction === 'back') {
-                for (let l = fromLine; l >= 0; l--) {
-                    let line = lines[l];
-                    let searchStart = l === fromLine ? fromCh : line.length;
-                    for (let idx = searchStart - 1; idx >= 0; idx--) {
-                        if (line.substr(idx, markerTrim.length) === markerTrim) return { type: 'marker', pos: { line: l, ch: idx } };
-                        if (line.substr(idx, oppositeTrim.length) === oppositeTrim) return { type: 'opposite', pos: { line: l, ch: idx } };
-                    }
-                }
-            } else {
-                for (let l = fromLine; l < lines.length; l++) {
-                    let line = lines[l];
-                    let searchStart = l === fromLine ? fromCh : 0;
-                    for (let idx = searchStart; idx <= line.length - Math.min(markerTrim.length, oppositeTrim.length); idx++) {
-                        if (line.substr(idx, markerTrim.length) === markerTrim) return { type: 'marker', pos: { line: l, ch: idx } };
-                        if (line.substr(idx, oppositeTrim.length) === oppositeTrim) return { type: 'opposite', pos: { line: l, ch: idx } };
-                    }
-                }
-            }
-            return { type: null, pos: null };
-        }
-        let isComment = false;
-        let commentStartPos: { line: number, ch: number } | null = null;
-        let commentEndPos: { line: number, ch: number } | null = null;
-        const allLines = editor.getValue().split('\n');
-        if (markerStart && markerEnd) {
-            let beforeType, afterType;
-            if (selection) {
-                const before = scanForFirst(allLines, from.line, from.ch, markerStart, markerEnd, 'back');
-                const after = scanForFirst(allLines, to.line, to.ch, markerEnd, markerStart, 'forward');
-                beforeType = before.type;
-                afterType = after.type;
-                if (beforeType === 'marker') commentStartPos = before.pos;
-                if (afterType === 'marker') commentEndPos = after.pos;
-            } else {
-                const before = scanForFirst(allLines, cursor.line, cursor.ch, markerStart, markerEnd, 'back');
-                const after = scanForFirst(allLines, cursor.line, cursor.ch, markerEnd, markerStart, 'forward');
-                beforeType = before.type;
-                afterType = after.type;
-                if (beforeType === 'marker') commentStartPos = before.pos;
-                if (afterType === 'marker') commentEndPos = after.pos;
-            }
-            if (beforeType === 'marker' && afterType === 'marker') {
-                isComment = true;
-            } else if (beforeType === 'opposite' && afterType === 'opposite') {
-                isComment = false;
-            } else {
-                isComment = false;
-            }
-        }
-        logDev('comment:', isComment, {
-            start: commentStartPos ? { line: commentStartPos.line + 1, ch: commentStartPos.ch + 1 } : null,
-            end: commentEndPos ? { line: commentEndPos.line + 1, ch: commentEndPos.ch + 1 } : null
-        });
-
-        if (selection && markerStart && markerEnd) {
-            const lineText = editor.getLine(from.line);
-            const selectionText = selection;
-            let foundStart = false, foundEnd = false;
-            let startIdx = selectionText.indexOf(markerStart);
-            let endIdx = selectionText.indexOf(markerEnd);
-            function containsPartOfMarker(sel: string, marker: string): boolean {
-                if (!marker) return false;
-                for (let i = 1; i <= marker.length; i++) {
-                    if (sel.includes(marker.slice(0, i)) || sel.includes(marker.slice(-i))) return true;
-                }
-                return false;
-            }
-            if (!foundStart && containsPartOfMarker(selectionText, markerStart)) {
-                const left = lineText.slice(Math.max(0, from.ch - markerStart.length), from.ch + selectionText.length);
-                if (left.includes(markerStart)) {
-                    foundStart = true;
-                    startIdx = left.indexOf(markerStart) - (from.ch - Math.max(0, from.ch - markerStart.length));
-                }
-            }
-            if (!foundEnd && containsPartOfMarker(selectionText, markerEnd)) {
-                const right = lineText.slice(from.ch, Math.min(lineText.length, to.ch + markerEnd.length));
-                if (right.includes(markerEnd)) {
-                    foundEnd = true;
-                    endIdx = right.indexOf(markerEnd);
-                }
-            }
-            if (selectionText.includes(markerStart)) {
-                foundStart = true;
-                startIdx = selectionText.indexOf(markerStart);
-            }
-            if (selectionText.includes(markerEnd)) {
-                foundEnd = true;
-                endIdx = selectionText.indexOf(markerEnd);
-            }
-            if (markerStart === markerEnd && markerStart.length > 0 && (foundStart || foundEnd)) {
-                const before = scanForFirst(allLines, from.line, from.ch, markerStart, '', 'back');
-                const after = scanForFirst(allLines, to.line, to.ch, markerEnd, '', 'forward');
-                if (before.type === 'marker') commentStartPos = before.pos;
-                if (after.type === 'marker') commentEndPos = after.pos;
-                if (commentStartPos && commentEndPos) isComment = true;
-            } else if (foundStart && !foundEnd) {
-                let searchLine = from.line;
-                let searchCh = lineText.indexOf(markerStart, from.ch);
-                if (searchCh === -1) searchCh = from.ch;
-                let found = false;
-                for (let l = searchLine; l < allLines.length; l++) {
-                    let line = allLines[l];
-                    let start = (l === searchLine) ? searchCh + markerStart.length : 0;
-                    for (let idx = start; idx <= line.length - markerEnd.length; idx++) {
-                        if (line.substr(idx, markerEnd.length) === markerEnd) {
-                            commentStartPos = { line: searchLine, ch: searchCh };
-                            commentEndPos = { line: l, ch: idx };
-                            isComment = true;
-                            found = true;
-                            break;
-                        }
-                        if (line.substr(idx, markerStart.length) === markerStart && (l !== searchLine || idx !== searchCh)) {
-                            logDev('Stopped search for end marker: found another start marker first', { from: { line: searchLine, ch: searchCh }, at: { line: l, ch: idx } });
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (found) break;
-                }
-            } else if (foundEnd && !foundStart) {
-                let searchLine = to.line;
-                let searchCh = lineText.indexOf(markerEnd, from.ch);
-                if (searchCh === -1) searchCh = to.ch;
-                let found = false;
-                for (let l = searchLine; l >= 0; l--) {
-                    let line = allLines[l];
-                    let end = (l === searchLine) ? searchCh - 1 : line.length - 1;
-                    for (let idx = end; idx >= 0; idx--) {
-                        if (line.substr(idx, markerStart.length) === markerStart) {
-                            commentStartPos = { line: l, ch: idx };
-                            commentEndPos = { line: searchLine, ch: searchCh };
-                            isComment = true;
-                            found = true;
-                            break;
-                        }
-                        if (line.substr(idx, markerEnd.length) === markerEnd && (l !== searchLine || idx !== searchCh)) {
-                            logDev('Stopped search for start marker: found another end marker first', { from: { line: searchLine, ch: searchCh }, at: { line: l, ch: idx } });
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (found) break;
-                }
-            }
-            const atStartBoundary = from.ch <= markerStart.length && lineText.slice(0, markerStart.length).startsWith(markerStart);
-            const atEndBoundary = to.ch >= lineText.length - markerEnd.length && lineText.slice(-markerEnd.length).endsWith(markerEnd);
-            if (!atStartBoundary && !atEndBoundary) {
-                return;
-            }
-        }
-
-        if (selection && markerStart && markerEnd) {
-            const lineText = editor.getLine(from.line);
-            const selectionText = selection;
-            let foundStart = false, foundEnd = false;
-            let startIdx = selectionText.indexOf(markerStart);
-            let endIdx = selectionText.indexOf(markerEnd);
-            function containsPartOfMarker(sel: string, marker: string): boolean {
-                if (!marker) return false;
-                for (let i = 1; i <= marker.length; i++) {
-                    if (sel.includes(marker.slice(0, i)) || sel.includes(marker.slice(-i))) return true;
-                }
-                return false;
-            }
-            if (!foundStart && containsPartOfMarker(selectionText, markerStart)) {
-                const left = lineText.slice(Math.max(0, from.ch - markerStart.length), from.ch + selectionText.length);
-                if (left.includes(markerStart)) {
-                    foundStart = true;
-                    startIdx = left.indexOf(markerStart) - (from.ch - Math.max(0, from.ch - markerStart.length));
-                }
-            }
-            if (!foundEnd && containsPartOfMarker(selectionText, markerEnd)) {
-                const right = lineText.slice(from.ch, Math.min(lineText.length, to.ch + markerEnd.length));
-                if (right.includes(markerEnd)) {
-                    foundEnd = true;
-                    endIdx = right.indexOf(markerEnd);
-                }
-            }
-            if (selectionText.includes(markerStart)) {
-                foundStart = true;
-                startIdx = selectionText.indexOf(markerStart);
-            }
-            if (selectionText.includes(markerEnd)) {
-                foundEnd = true;
-                endIdx = selectionText.indexOf(markerEnd);
-            }
-            if (markerStart === markerEnd && markerStart.length > 0 && (foundStart || foundEnd)) {
-                const before = scanForFirst(allLines, from.line, from.ch, markerStart, '', 'back');
-                const after = scanForFirst(allLines, to.line, to.ch, markerEnd, '', 'forward');
-                if (before.type === 'marker') commentStartPos = before.pos;
-                if (after.type === 'marker') commentEndPos = after.pos;
-                if (commentStartPos && commentEndPos) isComment = true;
-            } else if (foundStart) {
-                const after = scanForFirst(allLines, to.line, to.ch, markerEnd, markerStart, 'forward');
-                if (after.type === 'marker') commentEndPos = after.pos;
-                const startLineIdx = from.line;
-                const startChIdx = lineText.indexOf(markerStart, from.ch);
-                if (startChIdx !== -1) commentStartPos = { line: startLineIdx, ch: startChIdx };
-                if (commentStartPos && commentEndPos) isComment = true;
-            } else if (foundEnd) {
-                const before = scanForFirst(allLines, from.line, from.ch, markerStart, markerEnd, 'back');
-                if (before.type === 'marker') commentStartPos = before.pos;
-                const endLineIdx = to.line;
-                const endChIdx = lineText.indexOf(markerEnd, from.ch);
-                if (endChIdx !== -1) commentEndPos = { line: endLineIdx, ch: endChIdx };
-                if (commentStartPos && commentEndPos) isComment = true;
-            }
-        }
-
-        if (isComment && commentStartPos && commentEndPos) {
-            let startLine = allLines[commentStartPos.line];
-            const startMarkerWithSpace = markerStart + ' ';
-            allLines[commentStartPos.line] = startLine.slice(0, commentStartPos.ch) + startLine.slice(commentStartPos.ch + startMarkerWithSpace.length);
-            let endLineIdx = commentEndPos.line;
-            let endChIdx = commentEndPos.ch;
-            if (commentStartPos.line === commentEndPos.line) {
-                endChIdx -= startMarkerWithSpace.length;
-                let updatedLine = allLines[endLineIdx];
-                const endMarkerWithSpace = ' ' + markerEnd;
-                endChIdx = updatedLine.indexOf(endMarkerWithSpace, endChIdx);
-                if (endChIdx === -1) {
-                    endChIdx = updatedLine.indexOf(markerEnd, endChIdx);
-                    if (endChIdx > 0 && updatedLine[endChIdx - 1] === ' ') {
-                        endChIdx = endChIdx - 1;
-                    }
-                }
-                if (endChIdx === -1) {
-                    return;
-                }
-                allLines[endLineIdx] = updatedLine.slice(0, endChIdx) + updatedLine.slice(endChIdx + endMarkerWithSpace.length);
-            } else {
-                let endLine = allLines[endLineIdx];
-                const endMarkerWithSpace = ' ' + markerEnd;
-                allLines[endLineIdx] = endLine.slice(0, endChIdx) + endLine.slice(endChIdx + endMarkerWithSpace.length);
-            }
-            const fromLine = Math.min(commentStartPos.line, commentEndPos.line);
-            const toLine = Math.max(commentStartPos.line, commentEndPos.line);
-            const newText = allLines.slice(fromLine, toLine + 1).join('\n');
-            editor.replaceRange(newText, { line: fromLine, ch: 0 }, { line: toLine, ch: editor.getLine(toLine).length });
-            let newCursorLine = from.line;
-            let newCursorCh = from.ch - startMarkerWithSpace.length;
-            if (newCursorCh < 0) newCursorCh = 0;
-            const lastLine = allLines.length - 1;
-            if (newCursorLine > lastLine) newCursorLine = lastLine;
-            let lineLen = allLines[newCursorLine]?.length ?? 0;
-            if (newCursorCh > lineLen) newCursorCh = lineLen;
-            let clamped = clampCursorPos({ line: newCursorLine, ch: newCursorCh });
-            editor.setCursor(clamped);
-            return;
-        }
-
-        let useWord = false;
-        wordBounds = getWordBounds(line, cursor.ch);
-        if (selection) {
-            useWord = false;
-        } else if (wordBounds) {
-            if (cursor.ch > wordBounds.start && cursor.ch < wordBounds.end) {
-                useWord = true;
-            } else if (this.settings.wordOnlyMode && (cursor.ch === wordBounds.start || cursor.ch === wordBounds.end)) {
-                useWord = true;
-            } else {
-                useWord = false;
-            }
-        }
-        logDev('Mode:', selection ? 'selection' : useWord ? 'word' : 'insert', { selection, wordBounds, useWord });
         if (selection) {
             text = selection;
-        } else if (useWord && wordBounds) {
-            text = line.slice(wordBounds.start, wordBounds.end);
-            from = { line: cursor.line, ch: wordBounds.start };
-            to = { line: cursor.line, ch: wordBounds.end };
         } else {
-            text = '';
-            from = { line: cursor.line, ch: cursor.ch };
-            to = { line: cursor.line, ch: cursor.ch };
-        }
-        let removalUsedStart = markerStart;
-        let removalUsedEnd = markerEnd;
-        let removalInside = false;
-        let removalCheckText = text;
-        if (selection) {
-            if (removalUsedStart && removalUsedEnd && selection.startsWith(removalUsedStart) && selection.endsWith(removalUsedEnd)) {
-                removalInside = true;
-                removalCheckText = selection;
+            wordBounds = getWordBounds(line, cursor.ch);
+            if (wordBounds && cursor.ch > wordBounds.start && cursor.ch < wordBounds.end) {
+                text = line.slice(wordBounds.start, wordBounds.end);
+                from = { line: cursor.line, ch: wordBounds.start };
+                to = { line: cursor.line, ch: wordBounds.end };
             } else {
-                for (const style of defaultStyles) {
-                    if (style.start && style.end && selection.startsWith(style.start) && selection.endsWith(style.end)) {
-                        removalUsedStart = style.start;
-                        removalUsedEnd = style.end;
-                        removalInside = true;
-                        removalCheckText = selection;
-                        break;
-                    }
-                }
+                text = '';
+                from = { line: cursor.line, ch: cursor.ch };
+                to = { line: cursor.line, ch: cursor.ch };
             }
-            if (!removalInside) {
-                const lineStart = editor.getLine(from.line);
-                const lineEnd = editor.getLine(to.line);
-                if (removalUsedStart && removalUsedEnd && lineStart.startsWith(removalUsedStart) && lineEnd.endsWith(removalUsedEnd)) {
-                    removalInside = true;
-                    removalCheckText = editor.getRange({ line: from.line, ch: 0 }, { line: to.line, ch: editor.getLine(to.line).length });
-                } else {
-                    for (const style of defaultStyles) {
-                        if (style.start && style.end && lineStart.startsWith(style.start) && lineEnd.endsWith(style.end)) {
-                            removalUsedStart = style.start;
-                            removalUsedEnd = style.end;
-                            removalInside = true;
-                            removalCheckText = editor.getRange({ line: from.line, ch: 0 }, { line: to.line, ch: editor.getLine(to.line).length });
-                            break;
-                        }
-                    }
-                }
+        }
+
+        // 3.1 Marker Search in Selection
+        function findMarkerInText(marker: string, text: string) {
+            let idx = text.indexOf(marker);
+            if (idx !== -1) return { idx, full: true };
+            // Try partials (from length-1 down to 1)
+            for (let len = marker.length - 1; len > 0; len--) {
+                if (text.includes(marker.slice(0, len))) return { idx: text.indexOf(marker.slice(0, len)), full: false };
+                if (text.includes(marker.slice(-len))) return { idx: text.indexOf(marker.slice(-len)), full: false };
             }
-        } else if (useWord && wordBounds) {
-            if (removalUsedStart && removalUsedEnd && line.startsWith(removalUsedStart) && line.endsWith(removalUsedEnd)) {
-                removalInside = true;
-                removalCheckText = line;
+            return { idx: -1, full: false };
+        }
+
+        // 3.2 Marker Search in Document
+        function searchMarkerInLine(marker: string, startIdx: number, direction: 'back' | 'forward') {
+            if (!marker) return -1;
+            if (direction === 'back') {
+                for (let i = startIdx; i >= 0; i--) {
+                    if (line.slice(i, i + marker.length) === marker) return i;
+                }
             } else {
-                for (const style of defaultStyles) {
-                    if (style.start && style.end && line.startsWith(style.start) && line.endsWith(style.end)) {
-                        removalUsedStart = style.start;
-                        removalUsedEnd = style.end;
-                        removalInside = true;
-                        removalCheckText = line;
-                        break;
-                    }
+                for (let i = startIdx; i <= line.length - marker.length; i++) {
+                    if (line.slice(i, i + marker.length) === marker) return i;
                 }
             }
-            if (!removalInside && removalUsedStart && removalUsedEnd && text.startsWith(removalUsedStart) && text.endsWith(removalUsedEnd)) {
-                removalInside = true;
-                removalCheckText = text;
-            } else if (!removalInside) {
-                for (const style of defaultStyles) {
-                    if (style.start && style.end && text.startsWith(style.start) && text.endsWith(style.end)) {
-                        removalUsedStart = style.start;
-                        removalUsedEnd = style.end;
-                        removalInside = true;
-                        removalCheckText = text;
-                        break;
-                    }
-                }
-            }
-        } else {
-            if (removalUsedStart && removalUsedEnd && line.startsWith(removalUsedStart) && line.endsWith(removalUsedEnd)) {
-                removalInside = true;
-                removalCheckText = line;
+            return -1;
+        }
+
+        // 4. Comment Region Detection
+        let startIdx = -1, endIdx = -1;
+        let region = '', regionIsComment = false;
+        let usedStart = normStart, usedEnd = normEnd;
+        if (selection) {
+            // Marker search in selection
+            const foundStart = findMarkerInText(normStart, text);
+            const foundEnd = findMarkerInText(normEnd, text);
+            if (foundStart.full && foundEnd.full) {
+                // Full marker in selection: search back for start, forward for end
+                startIdx = searchMarkerInLine(normStart, from.ch, 'back');
+                endIdx = searchMarkerInLine(normEnd, to.ch, 'forward');
+            } else if (foundStart.idx !== -1) {
+                // Partial start: search back for start
+                startIdx = searchMarkerInLine(normStart, from.ch, 'back');
+                endIdx = searchMarkerInLine(normEnd, to.ch, 'forward');
+            } else if (foundEnd.idx !== -1) {
+                // Partial end: search forward for end
+                startIdx = searchMarkerInLine(normStart, from.ch, 'back');
+                endIdx = searchMarkerInLine(normEnd, to.ch, 'forward');
             } else {
-                for (const style of defaultStyles) {
-                    if (style.start && style.end && line.startsWith(style.start) && line.endsWith(style.end)) {
-                        removalUsedStart = style.start;
-                        removalUsedEnd = style.end;
-                        removalInside = true;
-                        removalCheckText = line;
-                        break;
+                // No marker: search back from end for start, forward from start for end
+                startIdx = searchMarkerInLine(normStart, to.ch, 'back');
+                endIdx = searchMarkerInLine(normEnd, from.ch, 'forward');
+            }
+        } else if (wordBounds) {
+            // Use word boundary as selection
+            startIdx = searchMarkerInLine(normStart, wordBounds.start, 'back');
+            endIdx = searchMarkerInLine(normEnd, wordBounds.end, 'forward');
+        } else {
+            // Cursor
+            startIdx = searchMarkerInLine(normStart, cursor.ch, 'back');
+            endIdx = searchMarkerInLine(normEnd, cursor.ch, 'forward');
+        }
+        if (startIdx !== -1 && (usedEnd ? endIdx !== -1 && startIdx < endIdx : true)) {
+            // Extract region
+            const regionStart = startIdx + normStart.length;
+            const regionEnd = usedEnd && endIdx !== -1 ? endIdx : line.length;
+            region = line.slice(regionStart, regionEnd);
+            if (isRegionCommented(line.slice(startIdx, (usedEnd && endIdx !== -1 ? endIdx + normEnd.length : line.length)), normStart, normEnd)) {
+                regionIsComment = true;
+            }
+        } else {
+            // Try fallback styles
+            const fallback = detectFallback(line);
+            if (fallback.found) {
+                usedStart = fallback.markerStart ? normalize(fallback.markerStart) : '';
+                usedEnd = fallback.markerEnd ? normalize(fallback.markerEnd) : '';
+                startIdx = searchMarkerInLine(usedStart, cursor.ch, 'back');
+                endIdx = searchMarkerInLine(usedEnd, cursor.ch, 'forward');
+                if (startIdx !== -1 && (usedEnd ? endIdx !== -1 && startIdx < endIdx : true)) {
+                    const regionStart = startIdx + usedStart.length;
+                    const regionEnd = usedEnd && endIdx !== -1 ? endIdx : line.length;
+                    region = line.slice(regionStart, regionEnd);
+                    if (isRegionCommented(line.slice(startIdx, (usedEnd && endIdx !== -1 ? endIdx + usedEnd.length : line.length)), usedStart, usedEnd)) {
+                        regionIsComment = true;
                     }
                 }
             }
         }
-        function removeNearestMarkersFromWordOrSelection(text: string, start: string, end: string, selectionStart: number, selectionEnd: number): { result: string, newStart: number, newEnd: number } {
-            return { result: text, newStart: selectionStart, newEnd: selectionEnd };
-        }
-        if (removalInside) {
-            if (selection && removalUsedStart && removalCheckText === removalUsedStart) {
-                const lineText = editor.getLine(from.line);
-                const startIdx = lineText.indexOf(removalUsedStart);
-                const endIdx = removalUsedEnd ? lineText.indexOf(removalUsedEnd, startIdx + removalUsedStart.length) : -1;
-                if (endIdx !== -1) {
-                    const between = lineText.slice(startIdx + removalUsedStart.length, endIdx);
-                    if (/^\s*$/.test(between)) {
-                        logDev('Deleting end marker after deleting start marker', { line: from.line, startIdx, endIdx, removalUsedStart, removalUsedEnd });
-                        const before = lineText.slice(0, startIdx);
-                        const after = lineText.slice(endIdx + removalUsedEnd.length);
-                        editor.setLine(from.line, before + after);
-                        editor.setCursor({ line: from.line, ch: startIdx });
-                        return;
-                    }
-                }
-            }
-            return;
-        }
-        let usedStart = markerStart;
-        let usedEnd = markerEnd;
-        let inside = false;
-        let checkText = text;
-        if (selection) {
-            checkText = text;
-        } else if (useWord && wordBounds) {
-            checkText = line.slice(wordBounds.start, wordBounds.end);
-        } else {
-            checkText = text;
-        }
-        if (usedStart && isTextCommentedExact(checkText, usedStart, usedEnd)) {
-            inside = true;
-        } else {
-            for (const style of defaultStyles) {
-                if (style.start && isTextCommentedExact(checkText, style.start, style.end)) {
-                    usedStart = style.start;
-                    usedEnd = style.end;
-                    inside = true;
-                    break;
-                }
-            }
-        }
-        function buildCommented(text: string) {
-            return markerStart + ' ' + text + ' ' + markerEnd;
-        }
-        function stripCommented(str: string) {
-            const start = markerStart + ' ';
-            const end = ' ' + markerEnd;
-            if (str.startsWith(start) && str.endsWith(end)) {
-                return str.slice(start.length, str.length - end.length);
-            }
-            if (str.startsWith(markerStart) && str.endsWith(markerEnd)) {
-                return str.slice(markerStart.length, str.length - markerEnd.length).trim();
-            }
-            return null;
-        }
-        let uncommented = null;
-        if (selection) {
-            uncommented = stripCommented(text);
-            if (uncommented !== null) inside = true;
-        } else if (useWord && wordBounds) {
-            const wordText = line.slice(wordBounds.start, wordBounds.end);
-            uncommented = stripCommented(wordText);
-            if (uncommented !== null) inside = true;
-        } else {
-            uncommented = stripCommented(text);
-            if (uncommented !== null) inside = true;
-        }
-        if (inside) {
-            const safeUncommented = uncommented !== null ? uncommented : text;
+
+        // 5. Toggle Logic
+        if (regionIsComment) {
+            // Remove markers, and also remove spaces that were added with the markers
+            let beforeRegion = line.slice(0, startIdx);
+            let afterRegion = line.slice((usedEnd && endIdx !== -1 ? endIdx + usedEnd.length : line.length));
+            // Remove a single space after the start marker if present
+            if (region.startsWith(' ')) region = region.slice(1);
+            // Remove a single space before the end marker if present
+            if (region.endsWith(' ')) region = region.slice(0, -1);
+            let newLine = beforeRegion + region + afterRegion;
+            editor.setLine(cursor.line, newLine);
+            // 6. Cursor Management (restore relative position)
+            let removedBefore = 0;
             if (selection) {
-                editor.replaceSelection(safeUncommented);
-                const selFrom = clampCursorPos(from);
-                const selTo = clampCursorPos({ line: to.line, ch: from.ch + safeUncommented.length });
+                const unclamped = beforeRegion.length;
+                const selFrom = { line: cursor.line, ch: unclamped };
+                const selTo = { line: cursor.line, ch: unclamped + region.length };
                 editor.setSelection(selFrom, selTo);
-            } else if (useWord && wordBounds) {
-                editor.replaceRange(safeUncommented, { line: cursor.line, ch: wordBounds.start }, { line: cursor.line, ch: wordBounds.end });
-                const newCh = wordBounds.start + safeUncommented.length;
-                const clamped = clampCursorPos({ line: cursor.line, ch: newCh });
-                editor.setCursor(clamped);
+            } else if (wordBounds) {
+                const unclamped = beforeRegion.length;
+                editor.setCursor({ line: cursor.line, ch: unclamped });
             } else {
-                editor.replaceRange(safeUncommented, { line: cursor.line, ch: cursor.ch }, { line: cursor.line, ch: cursor.ch });
-                const clamped = clampCursorPos({ line: cursor.line, ch: cursor.ch });
-                editor.setCursor(clamped);
+                // Cursor: restore relative position
+                // Calculate how many chars were removed before the original cursor
+                removedBefore = (cursor.ch > startIdx ? Math.min(cursor.ch, startIdx + usedStart.length) - startIdx : 0) + usedStart.length;
+                let newCh = cursor.ch - removedBefore;
+                if (newCh < beforeRegion.length) newCh = beforeRegion.length;
+                editor.setCursor({ line: cursor.line, ch: newCh });
             }
+            logDev('Uncommented region', { from, to, region });
         } else {
-            let trimmedText = text.trim();
+            // Insert markers, preserve whitespace inside selection/word
+            let innerText = text;
+            if (!selection && !wordBounds && !text.trim()) innerText = '';
             let commented: string;
-            if (!selection && !trimmedText) {
-                commented = markerStart + '  ' + markerEnd;
-            } else {
-                commented = buildCommented(trimmedText);
-            }
-            if (!selection && !trimmedText) {
-                editor.replaceRange(commented, { line: cursor.line, ch: cursor.ch }, { line: cursor.line, ch: cursor.ch });
-                const cursorPos = cursor.ch + (markerStart + ' ').length;
-                const clamped = clampCursorPos({ line: cursor.line, ch: cursorPos });
-                editor.setCursor(clamped);
-            } else if (selection) {
-                editor.replaceSelection(commented);
-                const startOffset = (markerStart + ' ').length;
-                const selFrom = clampCursorPos({ line: from.line, ch: from.ch + startOffset });
-                const selTo = clampCursorPos({ line: to.line, ch: from.ch + startOffset + trimmedText.length });
+            let newLine;
+            if (selection) {
+                commented = usedStart + (innerText ? ' ' : '') + innerText + (innerText ? ' ' : '') + usedEnd;
+                newLine = line.slice(0, from.ch) + commented + line.slice(to.ch);
+                editor.setLine(cursor.line, newLine);
+                const selFrom = { line: cursor.line, ch: from.ch + usedStart.length + (innerText ? 1 : 0) };
+                const selTo = { line: cursor.line, ch: from.ch + usedStart.length + (innerText ? 1 : 0) + innerText.length };
                 editor.setSelection(selFrom, selTo);
-            } else if (useWord && wordBounds) {
-                editor.replaceRange(commented, { line: cursor.line, ch: wordBounds.start }, { line: cursor.line, ch: wordBounds.end });
-                const newCh = wordBounds.start + (markerStart + ' ').length;
-                const clamped = clampCursorPos({ line: cursor.line, ch: newCh });
-                editor.setCursor(clamped);
+            } else if (wordBounds && this.settings.wordOnlyMode) {
+                // Word only mode: treat word as selection (add spaces around word)
+                commented = usedStart + ' ' + line.slice(wordBounds.start, wordBounds.end) + ' ' + usedEnd;
+                newLine = line.slice(0, wordBounds.start) + commented + line.slice(wordBounds.end);
+                editor.setLine(cursor.line, newLine);
+                // Select the word inside the comment
+                const selFrom = { line: cursor.line, ch: wordBounds.start + usedStart.length + 1 };
+                const selTo = { line: cursor.line, ch: wordBounds.start + usedStart.length + 1 + (wordBounds.end - wordBounds.start) };
+                editor.setSelection(selFrom, selTo);
+            } else if (wordBounds) {
+                // Not word only mode: treat as cursor insert (no spaces around word)
+                commented = usedStart + '  ' + usedEnd;
+                newLine = line.slice(0, cursor.ch) + commented + line.slice(cursor.ch);
+                editor.setLine(cursor.line, newLine);
+                // Place cursor between the two spaces
+                editor.setCursor({ line: cursor.line, ch: cursor.ch + usedStart.length + 1 });
             } else {
-                editor.replaceRange(commented, { line: cursor.line, ch: cursor.ch }, { line: cursor.line, ch: cursor.ch });
-                const clamped = clampCursorPos({ line: cursor.line, ch: cursor.ch + (markerStart + ' ').length });
-                editor.setCursor(clamped);
+                commented = usedStart + '  ' + usedEnd;
+                newLine = line.slice(0, cursor.ch) + commented + line.slice(cursor.ch);
+                editor.setLine(cursor.line, newLine);
+                // Place cursor between the two spaces
+                editor.setCursor({ line: cursor.line, ch: cursor.ch + usedStart.length + 1 });
             }
+            logDev('Commented region', { from, to, commented });
+        }
+        // 6. Clamp cursor to valid position
+        function clampCursorPos(pos: { line: number, ch: number }): { line: number, ch: number } {
+            const allLines = editor.getValue().split('\n');
+            let line = Math.max(0, Math.min(pos.line, allLines.length - 1));
+            let ch = Math.max(0, Math.min(pos.ch, allLines[line]?.length ?? 0));
+            return { line, ch };
         }
         const finalCursor = clampCursorPos(editor.getCursor());
         if (finalCursor.line !== editor.getCursor().line || finalCursor.ch !== editor.getCursor().ch) {
