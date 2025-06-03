@@ -198,6 +198,77 @@ export default class CommentFormatPlugin extends Plugin {
         const normStart = normalize(markerStart);
         const normEnd = normalize(markerEnd);
 
+        // 3.1 Marker Search in Selection
+        function findMarkerInText(marker: string, text: string) {
+            let idx = text.indexOf(marker);
+            if (idx !== -1) return { idx, full: true };
+            // Try partials (from length-1 down to 1)
+            for (let len = marker.length - 1; len > 0; len--) {
+                if (text.includes(marker.slice(0, len))) return { idx: text.indexOf(marker.slice(0, len)), full: false, partial: marker.slice(0, len) };
+                if (text.includes(marker.slice(-len))) return { idx: text.indexOf(marker.slice(-len)), full: false, partial: marker.slice(-len) };
+            }
+            return { idx: -1, full: false };
+        }
+        // --- Advanced Partial Marker Detection ---
+        function confirmPartialMarker({
+            line,
+            marker,
+            partialIdx,
+            isStart,
+            otherMarker,
+            uniqueMarkers = true
+        }: {
+            line: string,
+            marker: string,
+            partialIdx: number,
+            isStart: boolean,
+            otherMarker: string,
+            uniqueMarkers?: boolean
+        }) {
+            const len = marker.length;
+            let fullIdx = -1;
+            for (let i = Math.max(0, partialIdx - len + 1); i <= partialIdx; i++) {
+                if (line.slice(i, i + len) === marker) {
+                    fullIdx = i;
+                    break;
+                }
+            }
+            if (fullIdx === -1) {
+                for (let i = partialIdx; i <= Math.min(line.length - len, partialIdx + len - 1); i++) {
+                    if (line.slice(i, i + len) === marker) {
+                        fullIdx = i;
+                        break;
+                    }
+                }
+            }
+            if (fullIdx === -1) return { confirmed: false };
+            if (isStart) {
+                let nextEnd = line.indexOf(otherMarker, fullIdx + len);
+                if (nextEnd === -1) return { confirmed: false };
+                if (uniqueMarkers) {
+                    let nextStart = line.indexOf(marker, fullIdx + len);
+                    if (nextStart !== -1 && nextStart < nextEnd) return { confirmed: false };
+                }
+                return { confirmed: true, startIdx: fullIdx, endIdx: nextEnd };
+            } else {
+                let prevStart = line.lastIndexOf(otherMarker, fullIdx - 1);
+                if (prevStart === -1) return { confirmed: false };
+                if (uniqueMarkers) {
+                    let prevEnd = line.lastIndexOf(marker, fullIdx - 1);
+                    if (prevEnd !== -1 && prevEnd > prevStart) return { confirmed: false };
+                }
+                return { confirmed: true, startIdx: prevStart, endIdx: fullIdx };
+            }
+        }
+        // --- Helper: Search for marker in line in a direction ---
+        function searchMarkerInLine(marker: string, fromIdx: number, direction: 'back' | 'forward'): number {
+            if (direction === 'back') {
+                return line.lastIndexOf(marker, fromIdx);
+            } else {
+                return line.indexOf(marker, fromIdx);
+            }
+        }
+
         // 2. Efficient Comment Detection
         function isRegionCommented(text: string, start: string, end: string) {
             const trimmed = text.trim();
@@ -253,54 +324,106 @@ export default class CommentFormatPlugin extends Plugin {
             }
         }
 
-        // 3.1 Marker Search in Selection
-        function findMarkerInText(marker: string, text: string) {
-            let idx = text.indexOf(marker);
-            if (idx !== -1) return { idx, full: true };
-            // Try partials (from length-1 down to 1)
-            for (let len = marker.length - 1; len > 0; len--) {
-                if (text.includes(marker.slice(0, len))) return { idx: text.indexOf(marker.slice(0, len)), full: false };
-                if (text.includes(marker.slice(-len))) return { idx: text.indexOf(marker.slice(-len)), full: false };
-            }
-            return { idx: -1, full: false };
-        }
-
-        // 3.2 Marker Search in Document
-        function searchMarkerInLine(marker: string, startIdx: number, direction: 'back' | 'forward') {
-            if (!marker) return -1;
-            if (direction === 'back') {
-                for (let i = startIdx; i >= 0; i--) {
-                    if (line.slice(i, i + marker.length) === marker) return i;
-                }
-            } else {
-                for (let i = startIdx; i <= line.length - marker.length; i++) {
-                    if (line.slice(i, i + marker.length) === marker) return i;
-                }
-            }
-            return -1;
-        }
-
         // 4. Comment Region Detection
         let startIdx = -1, endIdx = -1;
         let region = '', regionIsComment = false;
         let usedStart = normStart, usedEnd = normEnd;
+        let uniqueMarkers = Boolean(usedStart && usedEnd && usedStart !== usedEnd);
+        // --- Detection Logging ---
+        logDev('[Detection] selection:', selection);
+        logDev('[Detection] text:', text);
+        const foundStart = findMarkerInText(normStart, text);
+        const foundEnd = findMarkerInText(normEnd, text);
+        logDev('[Detection] foundStart:', foundStart);
+        logDev('[Detection] foundEnd:', foundEnd);
         if (selection) {
-            // Marker search in selection
-            const foundStart = findMarkerInText(normStart, text);
-            const foundEnd = findMarkerInText(normEnd, text);
             if (foundStart.full && foundEnd.full) {
-                // Full marker in selection: search back for start, forward for end
-                startIdx = searchMarkerInLine(normStart, from.ch, 'back');
-                endIdx = searchMarkerInLine(normEnd, to.ch, 'forward');
-            } else if (foundStart.idx !== -1) {
-                // Partial start: search back for start
-                startIdx = searchMarkerInLine(normStart, from.ch, 'back');
-                endIdx = searchMarkerInLine(normEnd, to.ch, 'forward');
-            } else if (foundEnd.idx !== -1) {
-                // Partial end: search forward for end
-                startIdx = searchMarkerInLine(normStart, from.ch, 'back');
-                endIdx = searchMarkerInLine(normEnd, to.ch, 'forward');
+                logDev('[Detection] Both full markers found in selection.');
+                // Full marker in selection: search back from selection end for start, forward from selection start for end
+                startIdx = searchMarkerInLine(normStart, to.ch, 'back');
+                endIdx = searchMarkerInLine(normEnd, from.ch, 'forward');
+            } else if (foundStart.full) {
+                logDev('[Detection] Only full start marker found in selection.');
+                // Only full start marker in selection: search forward from end of start marker for end marker
+                const startInSel = text.indexOf(normStart);
+                if (startInSel !== -1) {
+                    startIdx = from.ch + startInSel;
+                    endIdx = searchMarkerInLine(normEnd, startIdx + normStart.length, 'forward');
+                }
+            } else if (foundEnd.full) {
+                logDev('[Detection] Only full end marker found in selection.');
+                // Only full end marker in selection: search backward from start of end marker for start marker
+                const endInSel = text.indexOf(normEnd);
+                if (endInSel !== -1) {
+                    endIdx = from.ch + endInSel;
+                    startIdx = searchMarkerInLine(normStart, endIdx, 'back');
+                }
+            } else if (foundStart.idx !== -1 && !foundStart.full) {
+                logDev('[Detection] Partial start marker found in selection.');
+                // Partial start: confirm partial
+                const conf = confirmPartialMarker({
+                    line,
+                    marker: normStart,
+                    partialIdx: from.ch + foundStart.idx,
+                    isStart: true,
+                    otherMarker: normEnd,
+                    uniqueMarkers
+                });
+                logDev('[Detection] confirmPartialMarker result (start):', conf);
+                if (conf.confirmed && conf.startIdx !== undefined && conf.endIdx !== undefined) {
+                    startIdx = conf.startIdx;
+                    endIdx = conf.endIdx;
+                } else if (foundStart.partial && normEnd.startsWith(foundStart.partial)) {
+                    // Try as partial end marker
+                    logDev('[Detection] Partial start marker did not confirm, trying as partial end marker.');
+                    const confEnd = confirmPartialMarker({
+                        line,
+                        marker: normEnd,
+                        partialIdx: from.ch + foundStart.idx,
+                        isStart: false,
+                        otherMarker: normStart,
+                        uniqueMarkers
+                    });
+                    logDev('[Detection] confirmPartialMarker result (as end):', confEnd);
+                    if (confEnd.confirmed && confEnd.startIdx !== undefined && confEnd.endIdx !== undefined) {
+                        startIdx = confEnd.startIdx;
+                        endIdx = confEnd.endIdx;
+                    }
+                }
+            } else if (foundEnd.idx !== -1 && !foundEnd.full) {
+                logDev('[Detection] Partial end marker found in selection.');
+                // Partial end: confirm partial
+                const conf = confirmPartialMarker({
+                    line,
+                    marker: normEnd,
+                    partialIdx: to.ch + foundEnd.idx,
+                    isStart: false,
+                    otherMarker: normStart,
+                    uniqueMarkers
+                });
+                logDev('[Detection] confirmPartialMarker result (end):', conf);
+                if (conf.confirmed && conf.startIdx !== undefined && conf.endIdx !== undefined) {
+                    startIdx = conf.startIdx;
+                    endIdx = conf.endIdx;
+                } else if (foundEnd.partial && normStart.startsWith(foundEnd.partial)) {
+                    // Try as partial start marker
+                    logDev('[Detection] Partial end marker did not confirm, trying as partial start marker.');
+                    const confStart = confirmPartialMarker({
+                        line,
+                        marker: normStart,
+                        partialIdx: to.ch + foundEnd.idx,
+                        isStart: true,
+                        otherMarker: normEnd,
+                        uniqueMarkers
+                    });
+                    logDev('[Detection] confirmPartialMarker result (as start):', confStart);
+                    if (confStart.confirmed && confStart.startIdx !== undefined && confStart.endIdx !== undefined) {
+                        startIdx = confStart.startIdx;
+                        endIdx = confStart.endIdx;
+                    }
+                }
             } else {
+                logDev('[Detection] No marker found in selection, searching line.');
                 // No marker: search back from end for start, forward from start for end
                 startIdx = searchMarkerInLine(normStart, to.ch, 'back');
                 endIdx = searchMarkerInLine(normEnd, from.ch, 'forward');
@@ -314,8 +437,14 @@ export default class CommentFormatPlugin extends Plugin {
             startIdx = searchMarkerInLine(normStart, cursor.ch, 'back');
             endIdx = searchMarkerInLine(normEnd, cursor.ch, 'forward');
         }
+
+        // After detection, log the final indices and region
+        logDev('[Detection] startIdx:', startIdx, 'endIdx:', endIdx);
+        logDev('[Detection] region:', region);
+        logDev('[Detection] regionIsComment:', regionIsComment);
+
+        // If both valid, extract region and check if commented
         if (startIdx !== -1 && (usedEnd ? endIdx !== -1 && startIdx < endIdx : true)) {
-            // Extract region
             const regionStart = startIdx + normStart.length;
             const regionEnd = usedEnd && endIdx !== -1 ? endIdx : line.length;
             region = line.slice(regionStart, regionEnd);
