@@ -10,6 +10,13 @@ import { Plugin, Editor } from "obsidian";
 import { CommentFormatSettings, DEFAULT_SETTINGS } from "./settingsData";
 import { CommentFormatSettingTab } from "./settingsTab";
 
+// @ts-ignore
+import { EditorView, Decoration, WidgetType } from '@codemirror/view';
+// @ts-ignore
+import { StateField, StateEffect } from '@codemirror/state';
+// @ts-ignore
+import { RangeSetBuilder } from '@codemirror/state';
+
 // DEV logging utility: only logs if __DEV__ is true (set by esbuild)
 declare const __DEV__: boolean;
 function logDev(...args: any[]) {
