@@ -10,11 +10,20 @@ import { Plugin, Editor } from "obsidian";
 import { CommentFormatSettings, DEFAULT_SETTINGS } from "./settingsData";
 import { CommentFormatSettingTab } from "./settingsTab";
 
+// DEV logging utility: only logs if __DEV__ is true (set by esbuild)
+declare const __DEV__: boolean;
+function logDev(...args: any[]) {
+    if (typeof __DEV__ !== 'undefined' && __DEV__) {
+        // eslint-disable-next-line no-console
+        console.log('[CustomComment DEV]', ...args);
+    }
+}
+
 export default class CommentFormatPlugin extends Plugin {
     /**
      * Plugin settings, loaded on initialization.
      */
-    settings!: CommentFormatSettings;
+    settings!: CommentFormatSettings & { wordOnlyMode?: boolean };
 
     async onload() {
         await this.loadSettings();
@@ -64,6 +73,14 @@ export default class CommentFormatPlugin extends Plugin {
     }
 
     toggleComment(editor: Editor) {
+        logDev('toggleComment called', { selection: editor.getSelection(), cursor: editor.getCursor() });
+        // --- Clamp helper ---
+        function clampCursorPos(pos: { line: number, ch: number }): { line: number, ch: number } {
+            const allLines = editor.getValue().split('\n');
+            let line = Math.max(0, Math.min(pos.line, allLines.length - 1));
+            let ch = Math.max(0, Math.min(pos.ch, allLines[line]?.length ?? 0));
+            return { line, ch };
+        }
         const template = this.settings.template;
         const cursorIndex = template.indexOf("{cursor}");
         let before = template;
@@ -72,16 +89,13 @@ export default class CommentFormatPlugin extends Plugin {
             before = template.slice(0, cursorIndex);
             after = template.slice(cursorIndex + "{cursor}".length);
         }
-        const markerStart = before.trim();
-        const markerEnd = after.trim();
-
-        // Default comment styles to check
+        const markerStart = before;
+        const markerEnd = after;
         const defaultStyles = [
             { start: "%%", end: "%%" },
             { start: "<!--", end: "-->" },
             { start: "//", end: "" },
         ];
-
         const selection = editor.getSelection();
         const cursor = editor.getCursor();
         let text: string;
@@ -89,10 +103,10 @@ export default class CommentFormatPlugin extends Plugin {
         let to = editor.getCursor("to");
         let wordBounds: { start: number, end: number } | null = null;
         let line = editor.getLine(cursor.line);
-
-        // Helper to find word bounds at a given ch
+        // Helper to find word bounds at a given ch, ignoring punctuation
         function getWordBounds(line: string, ch: number): { start: number, end: number } | null {
-            const regex = /\w+/g;
+            // Only match sequences of letters, numbers, or underscores (ignore punctuation)
+            const regex = /[\p{L}\p{N}_]+/gu;
             let match;
             while ((match = regex.exec(line)) !== null) {
                 if (ch >= match.index && ch <= match.index + match[0].length) {
@@ -101,54 +115,256 @@ export default class CommentFormatPlugin extends Plugin {
             }
             return null;
         }
-
-        // Helper to check if a string is commented with given markers
-        function isTextCommented(str: string, start: string, end: string) {
+        function isTextCommentedExact(str: string, start: string, end: string) {
             if (!start) return false;
             if (end) {
-                return str.trim().startsWith(start) && str.trim().endsWith(end);
+                return str.startsWith(start) && str.endsWith(end);
             } else {
-                return str.trim().startsWith(start);
+                return str.startsWith(start);
             }
         }
-        // Helper to check if cursor is inside a comment
-        function isCursorInsideComment(line: string, cursorCh: number, start: string, end: string) {
-            const startIdx = line.indexOf(start);
-            const endIdx = end ? line.lastIndexOf(end) : -1;
-            if (start && end) {
-                return startIdx !== -1 && endIdx !== -1 && cursorCh >= startIdx + start.length && cursorCh <= endIdx;
-            } else if (start) {
-                return startIdx !== -1 && cursorCh >= startIdx + start.length;
+        // Utility: Scan lines in a direction for a marker, stopping if the opposite marker is found first
+        function scanForFirst(lines: string[], fromLine: number, fromCh: number, marker: string, opposite: string, direction: 'back' | 'forward'): { type: 'marker' | 'opposite' | null, pos: { line: number, ch: number } | null } {
+            // Remove leading/trailing whitespace for marker matching
+            const markerTrim = marker.trim();
+            const oppositeTrim = opposite.trim();
+            if (direction === 'back') {
+                for (let l = fromLine; l >= 0; l--) {
+                    let line = lines[l];
+                    let searchStart = l === fromLine ? fromCh : line.length;
+                    for (let idx = searchStart - 1; idx >= 0; idx--) {
+                        if (line.substr(idx, markerTrim.length) === markerTrim) return { type: 'marker', pos: { line: l, ch: idx } };
+                        if (line.substr(idx, oppositeTrim.length) === oppositeTrim) return { type: 'opposite', pos: { line: l, ch: idx } };
+                    }
+                }
+            } else {
+                for (let l = fromLine; l < lines.length; l++) {
+                    let line = lines[l];
+                    let searchStart = l === fromLine ? fromCh : 0;
+                    for (let idx = searchStart; idx <= line.length - Math.min(markerTrim.length, oppositeTrim.length); idx++) {
+                        if (line.substr(idx, markerTrim.length) === markerTrim) return { type: 'marker', pos: { line: l, ch: idx } };
+                        if (line.substr(idx, oppositeTrim.length) === oppositeTrim) return { type: 'opposite', pos: { line: l, ch: idx } };
+                    }
+                }
             }
-            return false;
+            return { type: null, pos: null };
         }
-
-        // If selection, operate as before
+        // Main logic for comment detection
+        let isComment = false;
+        let commentStartPos: { line: number, ch: number } | null = null;
+        let commentEndPos: { line: number, ch: number } | null = null;
+        const allLines = editor.getValue().split('\n');
+        if (markerStart && markerEnd) {
+            let beforeType, afterType;
+            if (selection) {
+                const before = scanForFirst(allLines, from.line, from.ch, markerStart, markerEnd, 'back');
+                const after = scanForFirst(allLines, to.line, to.ch, markerEnd, markerStart, 'forward');
+                beforeType = before.type;
+                afterType = after.type;
+                if (beforeType === 'marker') commentStartPos = before.pos;
+                if (afterType === 'marker') commentEndPos = after.pos;
+            } else {
+                const before = scanForFirst(allLines, cursor.line, cursor.ch, markerStart, markerEnd, 'back');
+                const after = scanForFirst(allLines, cursor.line, cursor.ch, markerEnd, markerStart, 'forward');
+                beforeType = before.type;
+                afterType = after.type;
+                if (beforeType === 'marker') commentStartPos = before.pos;
+                if (afterType === 'marker') commentEndPos = after.pos;
+            }
+            if (beforeType === 'marker' && afterType === 'marker') {
+                isComment = true;
+            } else if (beforeType === 'opposite' && afterType === 'opposite') {
+                isComment = false;
+            } else {
+                isComment = false;
+            }
+        }
+        // Log with 1-based line/ch for user clarity
+        logDev('comment:', isComment, {
+            start: commentStartPos ? { line: commentStartPos.line + 1, ch: commentStartPos.ch + 1 } : null,
+            end: commentEndPos ? { line: commentEndPos.line + 1, ch: commentEndPos.ch + 1 } : null
+        });
+        // If isComment is true, remove the detected markers
+        if (isComment && commentStartPos && commentEndPos) {
+            // Remove start marker (match full marker, not trimmed)
+            let startLine = allLines[commentStartPos.line];
+            allLines[commentStartPos.line] = startLine.slice(0, commentStartPos.ch) + startLine.slice(commentStartPos.ch + markerStart.length);
+            // Adjust end marker position if on same line as start
+            let endLineIdx = commentEndPos.line;
+            let endChIdx = commentEndPos.ch;
+            if (commentStartPos.line === commentEndPos.line) {
+                endChIdx -= markerStart.length;
+            }
+            // Remove end marker (match full marker, not trimmed)
+            let endLine = allLines[endLineIdx];
+            // Remove any single space immediately before the end marker (to avoid trailing space)
+            let spaceAdjust = 0;
+            if (endChIdx > 0 && endLine[endChIdx - 1] === ' ') {
+                endChIdx--;
+                spaceAdjust = 1;
+            }
+            allLines[endLineIdx] = endLine.slice(0, endChIdx) + endLine.slice(endChIdx + markerEnd.length);
+            // Replace the affected lines in the editor
+            const fromLine = Math.min(commentStartPos.line, commentEndPos.line);
+            const toLine = Math.max(commentStartPos.line, commentEndPos.line);
+            const newText = allLines.slice(fromLine, toLine + 1).join('\n');
+            editor.replaceRange(newText, { line: fromLine, ch: 0 }, { line: toLine, ch: editor.getLine(toLine).length });
+            // Adjust cursor position: keep it at the same logical place after removing start marker
+            let newCursorLine = from.line;
+            let newCursorCh = from.ch - markerStart.length;
+            if (newCursorCh < 0) newCursorCh = 0;
+            // If cursor would be outside the document, clamp to end
+            const lastLine = allLines.length - 1;
+            if (newCursorLine > lastLine) newCursorLine = lastLine;
+            let lineLen = allLines[newCursorLine]?.length ?? 0;
+            if (newCursorCh > lineLen) newCursorCh = lineLen;
+            // If the calculated line/ch is outside the document, set to very end
+            let clamped = clampCursorPos({ line: newCursorLine, ch: newCursorCh });
+            editor.setCursor(clamped);
+            return;
+        }
+        // Decide word or insert-at-cursor mode
+        let useWord = false;
+        wordBounds = getWordBounds(line, cursor.ch);
+        if (selection) {
+            useWord = false;
+        } else if (wordBounds) {
+            // Cursor is inside a word
+            if (cursor.ch > wordBounds.start && cursor.ch < wordBounds.end) {
+                // Always operate on the word if cursor is inside the word (not at boundary)
+                useWord = true;
+            } else if (this.settings.wordOnlyMode && (cursor.ch === wordBounds.start || cursor.ch === wordBounds.end)) {
+                // Only operate on the word at boundary if wordOnlyMode is enabled
+                useWord = true;
+            } else {
+                // At word boundary and wordOnlyMode is off: insert at cursor
+                useWord = false;
+            }
+        }
+        logDev('Mode:', selection ? 'selection' : useWord ? 'word' : 'insert', { selection, wordBounds, useWord });
+        // Determine text and range
         if (selection) {
             text = selection;
+        } else if (useWord && wordBounds) {
+            text = line.slice(wordBounds.start, wordBounds.end);
+            from = { line: cursor.line, ch: wordBounds.start };
+            to = { line: cursor.line, ch: wordBounds.end };
         } else {
-            // No selection: check if cursor is inside a word
-            wordBounds = getWordBounds(line, cursor.ch);
-            if (wordBounds) {
-                text = line.slice(wordBounds.start, wordBounds.end);
-                from = { line: cursor.line, ch: wordBounds.start };
-                to = { line: cursor.line, ch: wordBounds.end };
+            text = '';
+            from = { line: cursor.line, ch: cursor.ch };
+            to = { line: cursor.line, ch: cursor.ch };
+        }
+        // Remove block comment logic (findBlockCommentBounds) as it is not needed for the new comment detection
+        // Check if selection or word/line is inside a comment (custom or default)
+        // --- Removal takes priority ---
+        let removalUsedStart = before;
+        let removalUsedEnd = after;
+        let removalInside = false;
+        let removalCheckText = text;
+        if (selection) {
+            if (removalUsedStart && removalUsedEnd && selection.startsWith(removalUsedStart) && selection.endsWith(removalUsedEnd)) {
+                removalInside = true;
+                removalCheckText = selection;
             } else {
-                text = line;
-                from = { line: cursor.line, ch: 0 };
-                to = { line: cursor.line, ch: line.length };
+                for (const style of defaultStyles) {
+                    if (style.start && style.end && selection.startsWith(style.start) && selection.endsWith(style.end)) {
+                        removalUsedStart = style.start;
+                        removalUsedEnd = style.end;
+                        removalInside = true;
+                        removalCheckText = selection;
+                        break;
+                    }
+                }
+            }
+            if (!removalInside) {
+                const lineStart = editor.getLine(from.line);
+                const lineEnd = editor.getLine(to.line);
+                if (removalUsedStart && removalUsedEnd && lineStart.startsWith(removalUsedStart) && lineEnd.endsWith(removalUsedEnd)) {
+                    removalInside = true;
+                    removalCheckText = editor.getRange({ line: from.line, ch: 0 }, { line: to.line, ch: editor.getLine(to.line).length });
+                } else {
+                    for (const style of defaultStyles) {
+                        if (style.start && style.end && lineStart.startsWith(style.start) && lineEnd.endsWith(style.end)) {
+                            removalUsedStart = style.start;
+                            removalUsedEnd = style.end;
+                            removalInside = true;
+                            removalCheckText = editor.getRange({ line: from.line, ch: 0 }, { line: to.line, ch: editor.getLine(to.line).length });
+                            break;
+                        }
+                    }
+                }
+            }
+        } else if (useWord && wordBounds) {
+            if (removalUsedStart && removalUsedEnd && line.startsWith(removalUsedStart) && line.endsWith(removalUsedEnd)) {
+                removalInside = true;
+                removalCheckText = line;
+            } else {
+                for (const style of defaultStyles) {
+                    if (style.start && style.end && line.startsWith(style.start) && line.endsWith(style.end)) {
+                        removalUsedStart = style.start;
+                        removalUsedEnd = style.end;
+                        removalInside = true;
+                        removalCheckText = line;
+                        break;
+                    }
+                }
+            }
+            if (!removalInside && removalUsedStart && removalUsedEnd && text.startsWith(removalUsedStart) && text.endsWith(removalUsedEnd)) {
+                removalInside = true;
+                removalCheckText = text;
+            } else if (!removalInside) {
+                for (const style of defaultStyles) {
+                    if (style.start && style.end && text.startsWith(style.start) && text.endsWith(style.end)) {
+                        removalUsedStart = style.start;
+                        removalUsedEnd = style.end;
+                        removalInside = true;
+                        removalCheckText = text;
+                        break;
+                    }
+                }
+            }
+        } else {
+            if (removalUsedStart && removalUsedEnd && line.startsWith(removalUsedStart) && line.endsWith(removalUsedEnd)) {
+                removalInside = true;
+                removalCheckText = line;
+            } else {
+                for (const style of defaultStyles) {
+                    if (style.start && style.end && line.startsWith(style.start) && line.endsWith(style.end)) {
+                        removalUsedStart = style.start;
+                        removalUsedEnd = style.end;
+                        removalInside = true;
+                        removalCheckText = line;
+                        break;
+                    }
+                }
             }
         }
-
-        // Check if selection or word/line is inside a comment (custom or default)
+        // Remove the nearest comment markers before/after the word or selection
+        function removeNearestMarkersFromWordOrSelection(text: string, start: string, end: string, selectionStart: number, selectionEnd: number): { result: string, newStart: number, newEnd: number } {
+            // No-op: marker removal logic removed as requested
+            return { result: text, newStart: selectionStart, newEnd: selectionEnd };
+        }
+        if (removalInside) {
+            // No-op: skip marker removal entirely
+            return;
+        }
+        // Check if text/word/selection is commented
         let usedStart = markerStart;
         let usedEnd = markerEnd;
         let inside = false;
-        if (markerStart && isTextCommented(text, markerStart, markerEnd)) {
+        let checkText = text;
+        if (selection) {
+            checkText = text;
+        } else if (useWord && wordBounds) {
+            checkText = line.slice(wordBounds.start, wordBounds.end);
+        } else {
+            checkText = text;
+        }
+        if (usedStart && isTextCommentedExact(checkText, usedStart, usedEnd)) {
             inside = true;
         } else {
             for (const style of defaultStyles) {
-                if (style.start && isTextCommented(text, style.start, style.end)) {
+                if (style.start && isTextCommentedExact(checkText, style.start, style.end)) {
                     usedStart = style.start;
                     usedEnd = style.end;
                     inside = true;
@@ -156,54 +372,59 @@ export default class CommentFormatPlugin extends Plugin {
                 }
             }
         }
-
         if (inside) {
-            // Remove comment markers
-            let uncommented = text;
+            logDev('Removing exact comment markers', { usedStart, usedEnd, checkText });
+            // Remove comment markers (exact, not trimmed)
+            let uncommented = checkText;
             let removedStartLen = 0;
-            if (usedStart) {
-                const re = new RegExp(`^\\s*${usedStart.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')}`);
-                const match = uncommented.match(re);
-                if (match) {
-                    removedStartLen = match[0].length;
-                }
-                uncommented = uncommented.replace(re, "");
+            if (usedStart && uncommented.startsWith(usedStart)) {
+                removedStartLen = usedStart.length;
+                uncommented = uncommented.slice(usedStart.length);
             }
-            if (usedEnd) {
-                const re = new RegExp(`${usedEnd.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')}\\s*$`);
-                uncommented = uncommented.replace(re, "");
+            if (usedEnd && uncommented.endsWith(usedEnd)) {
+                uncommented = uncommented.slice(0, -usedEnd.length);
             }
-            uncommented = uncommented.trim();
             if (selection) {
                 editor.replaceSelection(uncommented);
-                editor.setSelection(from, { line: to.line, ch: to.ch - removedStartLen });
-            } else if (wordBounds) {
+                const selFrom = clampCursorPos(from);
+                const selTo = clampCursorPos({ line: to.line, ch: to.ch - removedStartLen });
+                editor.setSelection(selFrom, selTo);
+            } else if (useWord && wordBounds) {
                 editor.replaceRange(uncommented, { line: cursor.line, ch: wordBounds.start }, { line: cursor.line, ch: wordBounds.end });
                 const newCh = Math.max(wordBounds.start, cursor.ch - removedStartLen);
-                editor.setCursor({ line: cursor.line, ch: newCh });
+                const clamped = clampCursorPos({ line: cursor.line, ch: newCh });
+                editor.setCursor(clamped);
             } else {
-                editor.setLine(cursor.line, uncommented);
-                const newCh = Math.max(0, cursor.ch - removedStartLen);
-                editor.setCursor({ line: cursor.line, ch: newCh });
+                editor.replaceRange(uncommented, { line: cursor.line, ch: cursor.ch }, { line: cursor.line, ch: cursor.ch });
+                const clamped = clampCursorPos({ line: cursor.line, ch: cursor.ch });
+                editor.setCursor(clamped);
             }
         } else {
+            logDev('Adding comment markers', { markerStart, markerEnd, text });
             // Add comment markers, preserving template spaces
-            let commented = before + text + after;
+            let commented = markerStart + text + markerEnd;
             if (selection) {
                 editor.replaceSelection(commented);
-                const startOffset = before.length;
-                editor.setSelection(
-                    { line: from.line, ch: from.ch + startOffset },
-                    { line: to.line, ch: to.ch + startOffset }
-                );
-            } else if (wordBounds) {
+                const startOffset = markerStart.length;
+                const selFrom = clampCursorPos({ line: from.line, ch: from.ch + startOffset });
+                const selTo = clampCursorPos({ line: to.line, ch: to.ch + startOffset });
+                editor.setSelection(selFrom, selTo);
+            } else if (useWord && wordBounds) {
                 editor.replaceRange(commented, { line: cursor.line, ch: wordBounds.start }, { line: cursor.line, ch: wordBounds.end });
-                const newCh = cursor.ch + before.length;
-                editor.setCursor({ line: cursor.line, ch: newCh });
+                const newCh = cursor.ch + markerStart.length;
+                const clamped = clampCursorPos({ line: cursor.line, ch: newCh });
+                editor.setCursor(clamped);
             } else {
-                editor.setLine(cursor.line, commented);
-                editor.setCursor({ line: cursor.line, ch: cursor.ch + before.length });
+                // Insert at cursor
+                editor.replaceRange(commented, { line: cursor.line, ch: cursor.ch }, { line: cursor.line, ch: cursor.ch });
+                const clamped = clampCursorPos({ line: cursor.line, ch: cursor.ch + markerStart.length });
+                editor.setCursor(clamped);
             }
+        }
+        // After inserting, clamp cursor to end of document if needed
+        const finalCursor = clampCursorPos(editor.getCursor());
+        if (finalCursor.line !== editor.getCursor().line || finalCursor.ch !== editor.getCursor().ch) {
+            editor.setCursor(finalCursor);
         }
     }
 

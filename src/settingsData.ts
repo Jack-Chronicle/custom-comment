@@ -9,8 +9,10 @@
 
 export interface CommentFormatSettings {
     template: string;
+    wordOnlyMode?: boolean;
 }
 
 export const DEFAULT_SETTINGS: CommentFormatSettings = {
-    template: "%% {cursor} %%"
+    template: "%% {cursor} %%",
+    wordOnlyMode: false
 };

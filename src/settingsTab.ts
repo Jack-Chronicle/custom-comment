@@ -32,5 +32,17 @@ export class CommentFormatSettingTab extends PluginSettingTab {
                         await this.plugin.saveSettings();
                     })
             );
+
+        new Setting(containerEl)
+            .setName("Word-only toggle mode")
+            .setDesc("If enabled, toggling will un/comment the word at the cursor's location rather than inserting a comment at the cursor position.")
+            .addToggle(toggle =>
+                toggle
+                    .setValue(!!this.plugin.settings.wordOnlyMode)
+                    .onChange(async (value) => {
+                        this.plugin.settings.wordOnlyMode = value;
+                        await this.plugin.saveSettings();
+                    })
+            );
     }
 }
