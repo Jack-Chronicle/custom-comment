@@ -549,13 +549,23 @@ export default class CommentFormatPlugin extends Plugin {
             let commented: string;
             let newLine;
             if (selection) {
-                commented = usedStart + (innerText ? ' ' : '') + innerText + (innerText ? ' ' : '') + usedEnd;
-                newLine = line.slice(0, from.ch) + commented + line.slice(to.ch);
-                editor.setLine(cursor.line, newLine);
-                // Select the same region relative to the commented text
-                const startMarkerLen = usedStart.length + (innerText ? 1 : 0);
-                const selFrom = { line: cursor.line, ch: from.ch + startMarkerLen };
-                const selTo = { line: cursor.line, ch: from.ch + startMarkerLen + innerText.length };
+                // Multi-line selection: wrap the selection in markers, not just the current line
+                const selText = editor.getRange(from, to);
+                commented = usedStart + (selText ? ' ' : '') + selText + (selText ? ' ' : '') + usedEnd;
+                editor.replaceRange(commented, from, to);
+                // After insertion, select the same text as before (excluding the markers)
+                const startMarkerLen = usedStart.length + (selText ? 1 : 0);
+                const endMarkerLen = usedEnd.length + (selText ? 1 : 0);
+                // Compute new selection bounds
+                const selFrom = { line: from.line, ch: from.ch + startMarkerLen };
+                // Calculate the end position after insertion
+                let selTo;
+                if (from.line === to.line) {
+                    selTo = { line: to.line, ch: to.ch + startMarkerLen };
+                } else {
+                    // For multi-line, selection end shifts by start marker on first line only
+                    selTo = { line: to.line, ch: to.ch };
+                }
                 editor.setSelection(selFrom, selTo);
             } else if (wordBounds && this.settings.wordOnlyMode) {
                 // Word only mode: treat word as selection (add spaces around word)
