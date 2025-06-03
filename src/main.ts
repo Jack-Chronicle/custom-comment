@@ -39,6 +39,7 @@ export default class CommentFormatPlugin extends Plugin {
      */
     settings!: CommentFormatSettings & { wordOnlyMode?: boolean };
     private _markerCommandIds: string[] = [];
+    private _cleanupGuard: boolean = false;
 
     async onload() {
         await this.loadSettings();
@@ -51,9 +52,69 @@ export default class CommentFormatPlugin extends Plugin {
             callback: () => this.registerMarkerCommands(true)
         });
 
-        // Register all marker commands (main + enabled additional marker sets)
         this.registerMarkerCommands();
-        // Post processor removed as requested.
+        // Listen for editor changes to auto-cleanup markers if needed
+        this.registerEvent(this.app.workspace.on('editor-change', (editor: Editor) => {
+            if (!editor) return;
+            // Only run if the editor is active and focused
+            if (editor.hasFocus && editor.hasFocus()) {
+                this.handleEditorChange(editor);
+            }
+        }));
+    }
+
+    handleEditorChange(editor: Editor) {
+        // --- Only trigger cleanup if selection/cursor is at marker boundary and marker is partially/fully deleted ---
+        const selection = editor.getSelection();
+        const cursor = editor.getCursor();
+        const from = editor.getCursor("from");
+        const to = editor.getCursor("to");
+        const lineText = editor.getLine(cursor.line);
+        const template = this.settings.template;
+        const cursorIndex = template.indexOf("{cursor}");
+        let markerStart = template.slice(0, cursorIndex);
+        let markerEnd = template.slice(cursorIndex + "{cursor}".length);
+
+        // Helper: check if selection/cursor is at marker boundary
+        function isAtMarkerBoundary(sel: string, marker: string, line: string, from: number, to: number): boolean {
+            if (!marker) return false;
+            // At left boundary
+            if (from >= 0 && from <= marker.length && line.slice(from - marker.length, from) === marker) return true;
+            // At right boundary
+            if (to >= 0 && to <= line.length && line.slice(to, to + marker.length) === marker) return true;
+            // Selection contains part of marker at boundary
+            if (sel && marker.length > 0) {
+                for (let i = 1; i < marker.length; i++) {
+                    if (sel.startsWith(marker.slice(0, i)) || sel.endsWith(marker.slice(-i))) return true;
+                }
+            }
+            return false;
+        }
+
+        // Only trigger cleanup if selection/cursor is at marker boundary and marker is partially/fully deleted
+        let shouldCleanup = false;
+        if (selection) {
+            // Selection at marker boundary
+            shouldCleanup = isAtMarkerBoundary(selection, markerStart, lineText, from.ch, to.ch) ||
+                            isAtMarkerBoundary(selection, markerEnd, lineText, from.ch, to.ch);
+        } else {
+            // No selection: check if cursor is at marker boundary and marker is partially deleted
+            const before = lineText.slice(Math.max(0, cursor.ch - markerStart.length), cursor.ch);
+            const after = lineText.slice(cursor.ch, cursor.ch + markerEnd.length);
+            if ((markerStart && before && markerStart.startsWith(before) && before.length < markerStart.length && cursor.ch <= markerStart.length) ||
+                (markerEnd && after && markerEnd.endsWith(after) && after.length < markerEnd.length && cursor.ch >= lineText.length - markerEnd.length)) {
+                shouldCleanup = true;
+            }
+        }
+        if (shouldCleanup) {
+            if (this._cleanupGuard) return; // Prevent recursion/loops
+            this._cleanupGuard = true;
+            try {
+                this.toggleComment(editor);
+            } finally {
+                this._cleanupGuard = false;
+            }
+        }
     }
 
     /**
@@ -68,13 +129,18 @@ export default class CommentFormatPlugin extends Plugin {
         this._markerCommandIds = [];
 
         // Main command: always present, always visible, always named 'Toggle Comment: (%%|%%)'
-        const mainTemplate = this.settings.template ?? "%% {cursor} %%";
+        let mainTemplate = this.settings.template ?? "%% {cursor} %%";
         const cursorIndex = mainTemplate.indexOf("{cursor}");
         let before = "%%";
         let after = "%%";
         if (cursorIndex !== -1) {
             before = mainTemplate.slice(0, cursorIndex).trim() || "%%";
             after = mainTemplate.slice(cursorIndex + "{cursor}".length).trim() || "%%";
+            // Do NOT normalize or change the template in settings
+            // mainTemplate = `${before} {cursor} ${after}`;
+            // this.settings.template = mainTemplate;
+            before = before;
+            after = after;
         }
         const mainId = "toggle-comment-template";
         this.addCommand({
@@ -127,27 +193,24 @@ export default class CommentFormatPlugin extends Plugin {
     }
 
     insertComment(editor: Editor) {
-        const template = this.settings.template;
-        const cursorIndex = template.indexOf("{cursor}");
-
+        let template = this.settings.template;
+        let cursorIndex = template.indexOf("{cursor}");
         if (cursorIndex === -1) {
             // Fallback: insert template and move cursor to start
             editor.replaceSelection(template);
             return;
         }
-
         // Remove {cursor} and track where it was
-        const before = template.slice(0, cursorIndex);
-        const after = template.slice(cursorIndex + "{cursor}".length);
-
+        let before = template.slice(0, cursorIndex).trim();
+        let after = template.slice(cursorIndex + "{cursor}".length).trim();
+        // Always add a space around the cursor
+        const commentText = `${before} ${after}`.replace(/\s+/g, ' ').trim();
         const from = editor.getCursor();
-        editor.replaceSelection(before + after);
-
+        editor.replaceSelection(`${before}  ${after}`.replace(/\s+/g, ' ').replace(' ', ' {cursor} '));
         // Calculate the new cursor position
         const lines = before.split("\n");
         const cursorLineOffset = lines.length - 1;
-        const cursorChOffset = lines[lines.length - 1].length;
-
+        const cursorChOffset = lines[lines.length - 1].length + 1; // +1 for the space
         editor.setCursor({
             line: from.line + cursorLineOffset,
             ch: (cursorLineOffset ? 0 : from.ch) + cursorChOffset
@@ -169,9 +232,12 @@ export default class CommentFormatPlugin extends Plugin {
             return { line, ch };
         }
         let markerStart: string, markerEnd: string;
+        let markerStartNormalized: string, markerEndNormalized: string;
         if (markerSet) {
-            markerStart = markerSet.start;
-            markerEnd = markerSet.end;
+            markerStart = markerSet.start.trim();
+            markerEnd = markerSet.end.trim();
+            markerStartNormalized = markerSet.start.endsWith(' ')? markerSet.start : markerSet.start + ' ';
+            markerEndNormalized = markerSet.end.startsWith(' ')? markerSet.end : ' ' + markerSet.end;
         } else {
             const template = this.settings.template;
             const cursorIndex = template.indexOf("{cursor}");
@@ -181,8 +247,11 @@ export default class CommentFormatPlugin extends Plugin {
                 before = template.slice(0, cursorIndex);
                 after = template.slice(cursorIndex + "{cursor}".length);
             }
-            markerStart = before;
-            markerEnd = after;
+            markerStart = before.trim();
+            markerEnd = after.trim();
+            // Always normalize for placement: ensure a space after start and before end
+            markerStartNormalized = markerStart + (markerStart && !markerStart.endsWith(' ')? ' ' : '');
+            markerEndNormalized = (markerEnd && !markerEnd.startsWith(' ')? ' ' : '') + markerEnd;
         }
         const selection = editor.getSelection();
         const cursor = editor.getCursor();
@@ -272,26 +341,214 @@ export default class CommentFormatPlugin extends Plugin {
             start: commentStartPos ? { line: commentStartPos.line + 1, ch: commentStartPos.ch + 1 } : null,
             end: commentEndPos ? { line: commentEndPos.line + 1, ch: commentEndPos.ch + 1 } : null
         });
-        // If isComment is true, remove the detected markers
+
+        // --- Enhanced selection marker detection logic ---
+        if (selection && markerStart && markerEnd) {
+            const lineText = editor.getLine(from.line);
+            const selectionText = selection;
+            let foundStart = false, foundEnd = false;
+            let startIdx = selectionText.indexOf(markerStart);
+            let endIdx = selectionText.indexOf(markerEnd);
+            // Check if selection contains part of a marker
+            function containsPartOfMarker(sel: string, marker: string): boolean {
+                if (!marker) return false;
+                for (let i = 1; i <= marker.length; i++) {
+                    if (sel.includes(marker.slice(0, i)) || sel.includes(marker.slice(-i))) return true;
+                }
+                return false;
+            }
+            if (!foundStart && containsPartOfMarker(selectionText, markerStart)) {
+                // Check left and right of selection for full marker
+                const left = lineText.slice(Math.max(0, from.ch - markerStart.length), from.ch + selectionText.length);
+                if (left.includes(markerStart)) {
+                    foundStart = true;
+                    startIdx = left.indexOf(markerStart) - (from.ch - Math.max(0, from.ch - markerStart.length));
+                }
+            }
+            if (!foundEnd && containsPartOfMarker(selectionText, markerEnd)) {
+                const right = lineText.slice(from.ch, Math.min(lineText.length, to.ch + markerEnd.length));
+                if (right.includes(markerEnd)) {
+                    foundEnd = true;
+                    endIdx = right.indexOf(markerEnd);
+                }
+            }
+            if (selectionText.includes(markerStart)) {
+                foundStart = true;
+                startIdx = selectionText.indexOf(markerStart);
+            }
+            if (selectionText.includes(markerEnd)) {
+                foundEnd = true;
+                endIdx = selectionText.indexOf(markerEnd);
+            }
+            // If start/end markers are identical, search both directions
+            if (markerStart === markerEnd && markerStart.length > 0 && (foundStart || foundEnd)) {
+                // Search both directions for the other marker
+                const before = scanForFirst(allLines, from.line, from.ch, markerStart, '', 'back');
+                const after = scanForFirst(allLines, to.line, to.ch, markerEnd, '', 'forward');
+                if (before.type === 'marker') commentStartPos = before.pos;
+                if (after.type === 'marker') commentEndPos = after.pos;
+                if (commentStartPos && commentEndPos) isComment = true;
+            } else if (foundStart && !foundEnd) {
+                // Redundant search: search forward for end marker, stop if another start marker is found
+                let searchLine = from.line;
+                let searchCh = lineText.indexOf(markerStart, from.ch);
+                if (searchCh === -1) searchCh = from.ch;
+                let found = false;
+                for (let l = searchLine; l < allLines.length; l++) {
+                    let line = allLines[l];
+                    let start = (l === searchLine) ? searchCh + markerStart.length : 0;
+                    for (let idx = start; idx <= line.length - markerEnd.length; idx++) {
+                        if (line.substr(idx, markerEnd.length) === markerEnd) {
+                            commentStartPos = { line: searchLine, ch: searchCh };
+                            commentEndPos = { line: l, ch: idx };
+                            isComment = true;
+                            found = true;
+                            break;
+                        }
+                        if (line.substr(idx, markerStart.length) === markerStart && (l !== searchLine || idx !== searchCh)) {
+                            logDev('Stopped search for end marker: found another start marker first', { from: { line: searchLine, ch: searchCh }, at: { line: l, ch: idx } });
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (found) break;
+                }
+            } else if (foundEnd && !foundStart) {
+                // Redundant search: search backward for start marker, stop if another end marker is found
+                let searchLine = to.line;
+                let searchCh = lineText.indexOf(markerEnd, from.ch);
+                if (searchCh === -1) searchCh = to.ch;
+                let found = false;
+                for (let l = searchLine; l >= 0; l--) {
+                    let line = allLines[l];
+                    let end = (l === searchLine) ? searchCh - 1 : line.length - 1;
+                    for (let idx = end; idx >= 0; idx--) {
+                        if (line.substr(idx, markerStart.length) === markerStart) {
+                            commentStartPos = { line: l, ch: idx };
+                            commentEndPos = { line: searchLine, ch: searchCh };
+                            isComment = true;
+                            found = true;
+                            break;
+                        }
+                        if (line.substr(idx, markerEnd.length) === markerEnd && (l !== searchLine || idx !== searchCh)) {
+                            logDev('Stopped search for start marker: found another end marker first', { from: { line: searchLine, ch: searchCh }, at: { line: l, ch: idx } });
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (found) break;
+                }
+            }
+            // Only trigger marker removal if selection/cursor is at marker boundary
+            const atStartBoundary = from.ch <= markerStart.length && lineText.slice(0, markerStart.length).startsWith(markerStart);
+            const atEndBoundary = to.ch >= lineText.length - markerEnd.length && lineText.slice(-markerEnd.length).endsWith(markerEnd);
+            if (!atStartBoundary && !atEndBoundary) {
+                // Editing inside marker: do not remove or insert comment
+                return;
+            }
+        }
+
+        // --- Enhanced selection marker detection logic ---
+        if (selection && markerStart && markerEnd) {
+            const lineText = editor.getLine(from.line);
+            const selectionText = selection;
+            let foundStart = false, foundEnd = false;
+            let startIdx = selectionText.indexOf(markerStart);
+            let endIdx = selectionText.indexOf(markerEnd);
+            // Check if selection contains part of a marker
+            function containsPartOfMarker(sel: string, marker: string): boolean {
+                if (!marker) return false;
+                for (let i = 1; i <= marker.length; i++) {
+                    if (sel.includes(marker.slice(0, i)) || sel.includes(marker.slice(-i))) return true;
+                }
+                return false;
+            }
+            if (!foundStart && containsPartOfMarker(selectionText, markerStart)) {
+                // Check left and right of selection for full marker
+                const left = lineText.slice(Math.max(0, from.ch - markerStart.length), from.ch + selectionText.length);
+                if (left.includes(markerStart)) {
+                    foundStart = true;
+                    startIdx = left.indexOf(markerStart) - (from.ch - Math.max(0, from.ch - markerStart.length));
+                }
+            }
+            if (!foundEnd && containsPartOfMarker(selectionText, markerEnd)) {
+                const right = lineText.slice(from.ch, Math.min(lineText.length, to.ch + markerEnd.length));
+                if (right.includes(markerEnd)) {
+                    foundEnd = true;
+                    endIdx = right.indexOf(markerEnd);
+                }
+            }
+            if (selectionText.includes(markerStart)) {
+                foundStart = true;
+                startIdx = selectionText.indexOf(markerStart);
+            }
+            if (selectionText.includes(markerEnd)) {
+                foundEnd = true;
+                endIdx = selectionText.indexOf(markerEnd);
+            }
+            // If start/end markers are identical, search both directions
+            if (markerStart === markerEnd && markerStart.length > 0 && (foundStart || foundEnd)) {
+                // Search both directions for the other marker
+                const before = scanForFirst(allLines, from.line, from.ch, markerStart, '', 'back');
+                const after = scanForFirst(allLines, to.line, to.ch, markerEnd, '', 'forward');
+                if (before.type === 'marker') commentStartPos = before.pos;
+                if (after.type === 'marker') commentEndPos = after.pos;
+                if (commentStartPos && commentEndPos) isComment = true;
+            } else if (foundStart) {
+                // Search forward for end marker
+                const after = scanForFirst(allLines, to.line, to.ch, markerEnd, markerStart, 'forward');
+                if (after.type === 'marker') commentEndPos = after.pos;
+                // Set start marker position
+                const startLineIdx = from.line;
+                const startChIdx = lineText.indexOf(markerStart, from.ch);
+                if (startChIdx !== -1) commentStartPos = { line: startLineIdx, ch: startChIdx };
+                if (commentStartPos && commentEndPos) isComment = true;
+            } else if (foundEnd) {
+                // Search backward for start marker
+                const before = scanForFirst(allLines, from.line, from.ch, markerStart, markerEnd, 'back');
+                if (before.type === 'marker') commentStartPos = before.pos;
+                // Set end marker position
+                const endLineIdx = to.line;
+                const endChIdx = lineText.indexOf(markerEnd, from.ch);
+                if (endChIdx !== -1) commentEndPos = { line: endLineIdx, ch: endChIdx };
+                if (commentStartPos && commentEndPos) isComment = true;
+            }
+        }
+
         if (isComment && commentStartPos && commentEndPos) {
-            // Remove start marker (match full marker, not trimmed)
+            // Remove start marker (marker + following space)
             let startLine = allLines[commentStartPos.line];
-            allLines[commentStartPos.line] = startLine.slice(0, commentStartPos.ch) + startLine.slice(commentStartPos.ch + markerStart.length);
+            const startMarkerWithSpace = markerStart + ' ';
+            allLines[commentStartPos.line] = startLine.slice(0, commentStartPos.ch) + startLine.slice(commentStartPos.ch + startMarkerWithSpace.length);
             // Adjust end marker position if on same line as start
             let endLineIdx = commentEndPos.line;
             let endChIdx = commentEndPos.ch;
             if (commentStartPos.line === commentEndPos.line) {
-                endChIdx -= markerStart.length;
+                // Recalculate end marker position after start marker removal
+                endChIdx -= startMarkerWithSpace.length;
+                // Re-scan for the end marker after start marker removal
+                let updatedLine = allLines[endLineIdx];
+                const endMarkerWithSpace = ' ' + markerEnd;
+                endChIdx = updatedLine.indexOf(endMarkerWithSpace, endChIdx);
+                if (endChIdx === -1) {
+                    // fallback: try to find just the marker
+                    endChIdx = updatedLine.indexOf(markerEnd, endChIdx);
+                    if (endChIdx > 0 && updatedLine[endChIdx - 1] === ' ') {
+                        endChIdx = endChIdx - 1;
+                    }
+                }
+                if (endChIdx === -1) {
+                    // If still not found, skip end marker removal
+                    return;
+                }
+                // Remove end marker (preceding space + marker)
+                allLines[endLineIdx] = updatedLine.slice(0, endChIdx) + updatedLine.slice(endChIdx + endMarkerWithSpace.length);
+            } else {
+                // Remove end marker (preceding space + marker)
+                let endLine = allLines[endLineIdx];
+                const endMarkerWithSpace = ' ' + markerEnd;
+                allLines[endLineIdx] = endLine.slice(0, endChIdx) + endLine.slice(endChIdx + endMarkerWithSpace.length);
             }
-            // Remove end marker (match full marker, not trimmed)
-            let endLine = allLines[endLineIdx];
-            // Remove any single space immediately before the end marker (to avoid trailing space)
-            let spaceAdjust = 0;
-            if (endChIdx > 0 && endLine[endChIdx - 1] === ' ') {
-                endChIdx--;
-                spaceAdjust = 1;
-            }
-            allLines[endLineIdx] = endLine.slice(0, endChIdx) + endLine.slice(endChIdx + markerEnd.length);
             // Replace the affected lines in the editor
             const fromLine = Math.min(commentStartPos.line, commentEndPos.line);
             const toLine = Math.max(commentStartPos.line, commentEndPos.line);
@@ -299,7 +556,7 @@ export default class CommentFormatPlugin extends Plugin {
             editor.replaceRange(newText, { line: fromLine, ch: 0 }, { line: toLine, ch: editor.getLine(toLine).length });
             // Adjust cursor position: keep it at the same logical place after removing start marker
             let newCursorLine = from.line;
-            let newCursorCh = from.ch - markerStart.length;
+            let newCursorCh = from.ch - startMarkerWithSpace.length;
             if (newCursorCh < 0) newCursorCh = 0;
             // If cursor would be outside the document, clamp to end
             const lastLine = allLines.length - 1;
@@ -311,6 +568,7 @@ export default class CommentFormatPlugin extends Plugin {
             editor.setCursor(clamped);
             return;
         }
+
         // Decide word or insert-at-cursor mode
         let useWord = false;
         wordBounds = getWordBounds(line, cursor.ch);
@@ -429,10 +687,29 @@ export default class CommentFormatPlugin extends Plugin {
         }
         // Remove the nearest comment markers before/after the word or selection
         function removeNearestMarkersFromWordOrSelection(text: string, start: string, end: string, selectionStart: number, selectionEnd: number): { result: string, newStart: number, newEnd: number } {
-            // No-op: marker removal logic removed as requested
             return { result: text, newStart: selectionStart, newEnd: selectionEnd };
         }
         if (removalInside) {
+            // New logic: If user deletes the start marker and only spaces are between start and end marker, also delete the end marker
+            if (selection && removalUsedStart && removalCheckText === removalUsedStart) {
+                // Check if the text after the start marker up to the end marker is only whitespace
+                const lineText = editor.getLine(from.line);
+                const startIdx = lineText.indexOf(removalUsedStart);
+                const endIdx = removalUsedEnd ? lineText.indexOf(removalUsedEnd, startIdx + removalUsedStart.length) : -1;
+                if (endIdx !== -1) {
+                    const between = lineText.slice(startIdx + removalUsedStart.length, endIdx);
+                    if (/^\s*$/.test(between)) {
+                        logDev('Deleting end marker after deleting start marker', { line: from.line, startIdx, endIdx, removalUsedStart, removalUsedEnd });
+                        // Remove both start and end marker
+                        const before = lineText.slice(0, startIdx);
+                        const after = lineText.slice(endIdx + removalUsedEnd.length);
+                        editor.setLine(from.line, before + after);
+                        // Set cursor to where the start marker was
+                        editor.setCursor({ line: from.line, ch: startIdx });
+                        return;
+                    }
+                }
+            }
             // No-op: skip marker removal entirely
             return;
         }
@@ -460,52 +737,87 @@ export default class CommentFormatPlugin extends Plugin {
                 }
             }
         }
+        // --- Insertion/Removal logic ---
+        // Always insert: [start][space][text][space][end]
+        // Always remove: [start][space][text][space][end] (including spaces)
+        // Helper to build commented string
+        function buildCommented(text: string) {
+            return markerStart + ' ' + text + ' ' + markerEnd;
+        }
+        // Helper to match and remove full marker (with spaces)
+        function stripCommented(str: string) {
+            const start = markerStart + ' ';
+            const end = ' ' + markerEnd;
+            if (str.startsWith(start) && str.endsWith(end)) {
+                return str.slice(start.length, str.length - end.length);
+            }
+            // Try without spaces (legacy)
+            if (str.startsWith(markerStart) && str.endsWith(markerEnd)) {
+                return str.slice(markerStart.length, str.length - markerEnd.length).trim();
+            }
+            return null;
+        }
+        // ---
+        let uncommented = null;
+        if (selection) {
+            uncommented = stripCommented(text);
+            if (uncommented !== null) inside = true;
+        } else if (useWord && wordBounds) {
+            const wordText = line.slice(wordBounds.start, wordBounds.end);
+            uncommented = stripCommented(wordText);
+            if (uncommented !== null) inside = true;
+        } else {
+            uncommented = stripCommented(text);
+            if (uncommented !== null) inside = true;
+        }
         if (inside) {
-            logDev('Removing exact comment markers', { usedStart, usedEnd, checkText });
-            // Remove comment markers (exact, not trimmed)
-            let uncommented = checkText;
-            let removedStartLen = 0;
-            if (usedStart && uncommented.startsWith(usedStart)) {
-                removedStartLen = usedStart.length;
-                uncommented = uncommented.slice(usedStart.length);
-            }
-            if (usedEnd && uncommented.endsWith(usedEnd)) {
-                uncommented = uncommented.slice(0, -usedEnd.length);
-            }
+            // Remove full marker (with spaces)
+            const safeUncommented = uncommented !== null ? uncommented : text;
             if (selection) {
-                editor.replaceSelection(uncommented);
+                editor.replaceSelection(safeUncommented);
                 const selFrom = clampCursorPos(from);
-                const selTo = clampCursorPos({ line: to.line, ch: to.ch - removedStartLen });
+                const selTo = clampCursorPos({ line: to.line, ch: from.ch + safeUncommented.length });
                 editor.setSelection(selFrom, selTo);
             } else if (useWord && wordBounds) {
-                editor.replaceRange(uncommented, { line: cursor.line, ch: wordBounds.start }, { line: cursor.line, ch: wordBounds.end });
-                const newCh = Math.max(wordBounds.start, cursor.ch - removedStartLen);
+                editor.replaceRange(safeUncommented, { line: cursor.line, ch: wordBounds.start }, { line: cursor.line, ch: wordBounds.end });
+                const newCh = wordBounds.start + safeUncommented.length;
                 const clamped = clampCursorPos({ line: cursor.line, ch: newCh });
                 editor.setCursor(clamped);
             } else {
-                editor.replaceRange(uncommented, { line: cursor.line, ch: cursor.ch }, { line: cursor.line, ch: cursor.ch });
+                editor.replaceRange(safeUncommented, { line: cursor.line, ch: cursor.ch }, { line: cursor.line, ch: cursor.ch });
                 const clamped = clampCursorPos({ line: cursor.line, ch: cursor.ch });
                 editor.setCursor(clamped);
             }
         } else {
-            logDev('Adding comment markers', { markerStart, markerEnd, text });
-            // Add comment markers, preserving template spaces
-            let commented = markerStart + text + markerEnd;
-            if (selection) {
+            // Insert marker with spaces
+            let trimmedText = text.trim();
+            let commented: string;
+            if (!selection && !trimmedText) {
+                // No selection: insert two spaces between markers, cursor between them
+                commented = markerStart + '  ' + markerEnd;
+            } else {
+                commented = buildCommented(trimmedText);
+            }
+            if (!selection && !trimmedText) {
+                editor.replaceRange(commented, { line: cursor.line, ch: cursor.ch }, { line: cursor.line, ch: cursor.ch });
+                // Place cursor between the two spaces
+                const cursorPos = cursor.ch + (markerStart + ' ').length;
+                const clamped = clampCursorPos({ line: cursor.line, ch: cursorPos });
+                editor.setCursor(clamped);
+            } else if (selection) {
                 editor.replaceSelection(commented);
-                const startOffset = markerStart.length;
+                const startOffset = (markerStart + ' ').length;
                 const selFrom = clampCursorPos({ line: from.line, ch: from.ch + startOffset });
-                const selTo = clampCursorPos({ line: to.line, ch: to.ch + startOffset });
+                const selTo = clampCursorPos({ line: to.line, ch: from.ch + startOffset + trimmedText.length });
                 editor.setSelection(selFrom, selTo);
             } else if (useWord && wordBounds) {
                 editor.replaceRange(commented, { line: cursor.line, ch: wordBounds.start }, { line: cursor.line, ch: wordBounds.end });
-                const newCh = cursor.ch + markerStart.length;
+                const newCh = wordBounds.start + (markerStart + ' ').length;
                 const clamped = clampCursorPos({ line: cursor.line, ch: newCh });
                 editor.setCursor(clamped);
             } else {
-                // Insert at cursor
                 editor.replaceRange(commented, { line: cursor.line, ch: cursor.ch }, { line: cursor.line, ch: cursor.ch });
-                const clamped = clampCursorPos({ line: cursor.line, ch: cursor.ch + markerStart.length });
+                const clamped = clampCursorPos({ line: cursor.line, ch: cursor.ch + (markerStart + ' ').length });
                 editor.setCursor(clamped);
             }
         }
