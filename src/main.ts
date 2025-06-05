@@ -430,34 +430,32 @@ export default class CommentFormatPlugin extends Plugin {
                         removedWithinEndLine += normEnd.length + endSpace;
                     }
                 }
-                // Track removed characters per line
+                // Track removed characters per line (before and within selection)
                 const removedBefore: Record<number, number> = {};
                 const removedWithin: Record<number, number> = {};
                 // Start marker
-                if (start.line === from.line) {
-                    if (start.ch < from.ch) {
-                        removedBefore[start.line] = (removedBefore[start.line] || 0) + normStart.length + startSpace;
-                    } else if (start.ch >= from.ch && start.ch < to.ch && from.line === to.line) {
-                        removedWithin[start.line] = (removedWithin[start.line] || 0) + normStart.length + startSpace;
-                    }
-                } else {
-                    // If marker is on a line not matching start, but within selection
-                    if (start.line > from.line && start.line < to.line) {
-                        removedWithin[start.line] = (removedWithin[start.line] || 0) + normStart.length + startSpace;
-                    }
+                if (start.line === from.line && start.ch < from.ch) {
+                    removedBefore[start.line] = (removedBefore[start.line] || 0) + normStart.length + startSpace;
+                } else if (start.line === to.line && start.ch < to.ch) {
+                    // If start marker is on the end line and before end
+                    removedBefore[start.line] = (removedBefore[start.line] || 0) + normStart.length + startSpace;
+                } else if (start.line > from.line && start.line < to.line) {
+                    // Marker is within selection, on a line between start and end
+                    removedWithin[start.line] = (removedWithin[start.line] || 0) + normStart.length + startSpace;
+                } else if (start.line === from.line && start.ch >= from.ch && (from.line === to.line ? start.ch < to.ch : true)) {
+                    // Marker is within selection on start line
+                    removedWithin[start.line] = (removedWithin[start.line] || 0) + normStart.length + startSpace;
                 }
                 // End marker
-                if (end.line === to.line) {
-                    if (end.ch < to.ch) {
-                        removedBefore[end.line] = (removedBefore[end.line] || 0) + normEnd.length + endSpace;
-                    } else if (end.ch >= from.ch && end.ch < to.ch && from.line === to.line) {
-                        removedWithin[end.line] = (removedWithin[end.line] || 0) + normEnd.length + endSpace;
-                    }
-                } else {
-                    // If marker is on a line not matching end, but within selection
-                    if (end.line > from.line && end.line < to.line) {
-                        removedWithin[end.line] = (removedWithin[end.line] || 0) + normEnd.length + endSpace;
-                    }
+                if (end.line === to.line && end.ch < to.ch) {
+                    removedBefore[end.line] = (removedBefore[end.line] || 0) + normEnd.length + endSpace;
+                } else if (end.line === from.line && end.ch < from.ch) {
+                    removedBefore[end.line] = (removedBefore[end.line] || 0) + normEnd.length + endSpace;
+                } else if (end.line > from.line && end.line < to.line) {
+                    removedWithin[end.line] = (removedWithin[end.line] || 0) + normEnd.length + endSpace;
+                } else if (end.line === to.line && end.ch >= from.ch && (from.line === to.line ? end.ch < to.ch : true)) {
+                    // Marker is within selection on end line
+                    removedWithin[end.line] = (removedWithin[end.line] || 0) + normEnd.length + endSpace;
                 }
                 editor.transaction({
                     changes: [
@@ -474,7 +472,17 @@ export default class CommentFormatPlugin extends Plugin {
                 if (removedBefore[selTo.line] || removedWithin[selTo.line]) {
                     selTo.ch = Math.max(selFrom.ch, selTo.ch - (removedBefore[selTo.line] || 0) - (removedWithin[selTo.line] || 0));
                 }
-                logDev('Uncommented marker pair encompassing selection', { from, to, pairToRemove, removedBefore, removedWithin, selFrom, selTo });
+                // For debugging: collect removed character details
+                const removedCharsLog: Array<{ line: number, type: 'before' | 'within', count: number }> = [];
+                for (const lineStr in removedBefore) {
+                    const line = Number(lineStr);
+                    removedCharsLog.push({ line, type: 'before', count: removedBefore[line] });
+                }
+                for (const lineStr in removedWithin) {
+                    const line = Number(lineStr);
+                    removedCharsLog.push({ line, type: 'within', count: removedWithin[line] });
+                }
+                logDev('Uncommented marker pair encompassing selection', { from, to, pairToRemove, removedBefore, removedWithin, selFrom, selTo, removedCharsLog });
                 editor.setSelection(selFrom, selTo);
                 return;
             }
