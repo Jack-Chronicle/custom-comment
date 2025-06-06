@@ -15,6 +15,14 @@ import { EditorView, Decoration, WidgetType } from '@codemirror/view';
 // @ts-ignore
 import { StateField, StateEffect, RangeSetBuilder } from '@codemirror/state';
 
+import { normalize } from './utils/normalize';
+import { findMarkerInText } from './utils/findMarkerInText';
+import { confirmPartialMarker } from './utils/confirmPartialMarker';
+import { searchMarkerInLine } from './utils/searchMarkerInLine';
+import { isRegionCommented } from './utils/isRegionCommented';
+import { detectFallback } from './utils/detectFallback';
+import { getWordBounds } from './utils/getWordBounds';
+
 // DEV logging utility: only logs if __DEV__ is true (set by esbuild)
 declare const __DEV__: boolean;
 function logDev(...args: any[]) {
@@ -192,104 +200,15 @@ export default class CommentFormatPlugin extends Plugin {
             markerStart = before.trim();
             markerEnd = after.trim();
         }
-        function normalize(str: string) {
-            return str.replace(/\s+/g, ' ').trim();
-        }
         const normStart = normalize(markerStart);
         const normEnd = normalize(markerEnd);
 
         // 3.1 Marker Search in Selection
-        function findMarkerInText(marker: string, text: string) {
-            let idx = text.indexOf(marker);
-            if (idx !== -1) return { idx, full: true };
-            // Try partials (from length-1 down to 1)
-            for (let len = marker.length - 1; len > 0; len--) {
-                if (text.includes(marker.slice(0, len))) return { idx: text.indexOf(marker.slice(0, len)), full: false, partial: marker.slice(0, len) };
-                if (text.includes(marker.slice(-len))) return { idx: text.indexOf(marker.slice(-len)), full: false, partial: marker.slice(-len) };
-            }
-            return { idx: -1, full: false };
-        }
         // --- Advanced Partial Marker Detection ---
-        function confirmPartialMarker({
-            line,
-            marker,
-            partialIdx,
-            isStart,
-            otherMarker,
-            uniqueMarkers = true
-        }: {
-            line: string,
-            marker: string,
-            partialIdx: number,
-            isStart: boolean,
-            otherMarker: string,
-            uniqueMarkers?: boolean
-        }) {
-            const len = marker.length;
-            let fullIdx = -1;
-            for (let i = Math.max(0, partialIdx - len + 1); i <= partialIdx; i++) {
-                if (line.slice(i, i + len) === marker) {
-                    fullIdx = i;
-                    break;
-                }
-            }
-            if (fullIdx === -1) {
-                for (let i = partialIdx; i <= Math.min(line.length - len, partialIdx + len - 1); i++) {
-                    if (line.slice(i, i + len) === marker) {
-                        fullIdx = i;
-                        break;
-                    }
-                }
-            }
-            if (fullIdx === -1) return { confirmed: false };
-            if (isStart) {
-                let nextEnd = line.indexOf(otherMarker, fullIdx + len);
-                if (nextEnd === -1) return { confirmed: false };
-                if (uniqueMarkers) {
-                    let nextStart = line.indexOf(marker, fullIdx + len);
-                    if (nextStart !== -1 && nextStart < nextEnd) return { confirmed: false };
-                }
-                return { confirmed: true, startIdx: fullIdx, endIdx: nextEnd };
-            } else {
-                let prevStart = line.lastIndexOf(otherMarker, fullIdx - 1);
-                if (prevStart === -1) return { confirmed: false };
-                if (uniqueMarkers) {
-                    let prevEnd = line.lastIndexOf(marker, fullIdx - 1);
-                    if (prevEnd !== -1 && prevEnd > prevStart) return { confirmed: false };
-                }
-                return { confirmed: true, startIdx: prevStart, endIdx: fullIdx };
-            }
-        }
         // --- Helper: Search for marker in line in a direction ---
-        function searchMarkerInLine(marker: string, fromIdx: number, direction: 'back' | 'forward'): number {
-            if (direction === 'back') {
-                return line.lastIndexOf(marker, fromIdx);
-            } else {
-                return line.indexOf(marker, fromIdx);
-            }
-        }
 
         // 2. Efficient Comment Detection
-        function isRegionCommented(text: string, start: string, end: string) {
-            const trimmed = text.trim();
-            if (start && end) {
-                return trimmed.startsWith(start) && trimmed.endsWith(end);
-            } else if (start) {
-                return trimmed.startsWith(start);
-            }
-            return false;
-        }
         // fallback style detection
-        function detectFallback(text: string) {
-            for (const style of defaultStyles) {
-                const s = normalize(style.start);
-                const e = normalize(style.end);
-                if (isRegionCommented(text, s, e)) {
-                    return { found: true, markerStart: style.start, markerEnd: style.end };
-                }
-            }
-            return { found: false };
-        }
 
         // 3. Mode Decision
         const selection = editor.getSelection();
@@ -299,16 +218,6 @@ export default class CommentFormatPlugin extends Plugin {
         let line = editor.getLine(cursor.line);
         let text: string;
         let wordBounds: { start: number, end: number } | null = null;
-        function getWordBounds(line: string, ch: number): { start: number, end: number } | null {
-            const regex = /[\p{L}\p{N}_]+/gu;
-            let match;
-            while ((match = regex.exec(line)) !== null) {
-                if (ch >= match.index && ch <= match.index + match[0].length) {
-                    return { start: match.index, end: match.index + match[0].length };
-                }
-            }
-            return null;
-        }
         if (selection) {
             text = selection;
         } else {
