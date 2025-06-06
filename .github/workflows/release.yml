@@ -33,7 +33,7 @@ jobs:
         with:
           name: plugin-build
           path: |
-            main.js
+            dist/main.js
             manifest.json
             package.json
 
@@ -116,7 +116,7 @@ jobs:
           tag_name: ${{ steps.bump_version.outputs.new_version || steps.use_new_version.outputs.new_version }}
           name: ${{ steps.bump_version.outputs.new_version || steps.use_new_version.outputs.new_version }}
           files: |
-            main.js
+            dist/main.js
             manifest.json
             package.json
         env:
