@@ -4,20 +4,24 @@ Lets you customize your comment syntax/formats in Obsidian.
 
 ## Features
 
+> I'm putting comments in quotes as they don't really work as comments unless you use one of the methods supported by obsidian (HTML or Markdown)
+
 - Insert custom comment templates anywhere in your notes.
 - Define your own comment format using `{cursor}` as a placeholder for the cursor position.
-- Example templates:
-  - `%% {cursor} %%`
-  - `<!-- {cursor} -->`
+  - Example templates:
+    - `%% {cursor} %%`
+    - `<!-- {cursor} -->`
+- You can add additional sets if you want even more 'comment' markers
+  - Each set has a toggle for adding commands for them
+- A command for reloading the plugin if you have more than 9 additional sets of 'comment' markers
 
 ## Installation
 
 ### Manual Installation
 
-1. Clone or download this repository.
-2. Run `npm install` to install dependencies.
-3. Build the plugin: `npm run build`
-4. Copy `main.js`, `manifest.json` to your Obsidian vault's `.obsidian/plugins/custom-comment` folder.
+1. Download the `main.js` and `manifest.json` files from the Releases page
+2. Move the files to your Obsidian vault's `.obsidian/plugins/custom-comment` folder.
+   1. You can open this up by going to your settings > community plugins page and clicking the little folder icon
 
 ### Community Plugins
 
@@ -33,6 +37,11 @@ Lets you customize your comment syntax/formats in Obsidian.
 ## Settings
 
 - **Comment Format**: Set your desired comment template. Use `{cursor}` to indicate where the cursor should be placed after insertion.
+- **Word-only Mode**: If enabled, toggling will comment/uncomment the word at the cursor instead of inserting the template at the cursor position.
+- **Additional Marker Sets**: Add multiple custom marker sets (start/end pairs). Each set can be enabled/disabled for command registration.
+  - A toggle for en/disabling the command for that set
+  - Two input fields, one for the *start* and one for the *end* markers
+- **Reload Marker Commands**: Command to reload marker commands in-place if you change marker sets (no plugin reload required).
 
 ## Development
 

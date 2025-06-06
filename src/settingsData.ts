@@ -7,10 +7,20 @@
  * @constant DEFAULT_SETTINGS - Default settings for the plugin.
  */
 
+export interface MarkerSet {
+    start: string;
+    end: string;
+    registerCommand?: boolean;
+}
+
 export interface CommentFormatSettings {
     template: string;
+    wordOnlyMode?: boolean;
+    additionalMarkers?: Array<MarkerSet>;
 }
 
 export const DEFAULT_SETTINGS: CommentFormatSettings = {
-    template: "%% {cursor} %%"
+    template: "%% {cursor} %%",
+    wordOnlyMode: false,
+    additionalMarkers: []
 };
