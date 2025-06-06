@@ -68,6 +68,24 @@ export default class CommentFormatPlugin extends Plugin {
         });
 
         this.registerMarkerCommands();
+        // Register mobile toolbar command for main toggle
+        let toolbarTemplate = this.settings.template ?? "%% {cursor} %%";
+        const toolbarCursorIndex = toolbarTemplate.indexOf("{cursor}");
+        let toolbarBefore = "%%";
+        let toolbarAfter = "%%";
+        if (toolbarCursorIndex !== -1) {
+            toolbarBefore = toolbarTemplate.slice(0, toolbarCursorIndex).trim() || "%%";
+            toolbarAfter = toolbarTemplate.slice(toolbarCursorIndex + "{cursor}".length).trim() || "%%";
+        }
+        // Compose the label with spaces and a '|' for the cursor
+        const toolbarLabel = `${toolbarBefore}${toolbarBefore ? ' ' : ''}|${toolbarAfter ? ' ' : ''}${toolbarAfter}`.trim();
+        this.addCommand({
+            id: "toggle-comment-toolbar",
+            name: `Toggle Comment: (${toolbarLabel})`,
+            editorCallback: (editor: Editor) => this.toggleComment(editor),
+            icon: "ampersands",
+            mobileOnly: true
+        });
         // Removed: auto-cleanup event registration
     }
 
@@ -211,6 +229,7 @@ export default class CommentFormatPlugin extends Plugin {
         // 2. Efficient Comment Detection
         // fallback style detection
 
+        let wordOnlyMode = this.settings.wordOnlyMode;
         // 3. Mode Decision
         const { from, to, selection } = getSelectionRange(editor);
         const cursor = editor.getCursor();
@@ -221,7 +240,8 @@ export default class CommentFormatPlugin extends Plugin {
             text = selection;
         } else {
             wordBounds = getWordBounds(line, cursor.ch);
-            if (wordBounds && cursor.ch > wordBounds.start && cursor.ch < wordBounds.end) {
+            // Only use word bounds if wordOnlyMode is enabled
+            if (wordOnlyMode && wordBounds && cursor.ch >= wordBounds.start && cursor.ch <= wordBounds.end) {
                 text = line.slice(wordBounds.start, wordBounds.end);
                 from.line = cursor.line; from.ch = wordBounds.start;
                 to.line = cursor.line; to.ch = wordBounds.end;
@@ -229,6 +249,12 @@ export default class CommentFormatPlugin extends Plugin {
                 text = '';
                 // from and to already set to cursor position
             }
+        }
+
+        // Calculate offset in word if cursor is at start, inside, or end of word and wordOnlyMode is enabled
+        let offsetInWord = null;
+        if (wordOnlyMode && wordBounds && cursor.ch >= wordBounds.start && cursor.ch <= wordBounds.end) {
+            offsetInWord = cursor.ch - wordBounds.start;
         }
 
         // 4. Comment Region Detection
@@ -352,9 +378,17 @@ export default class CommentFormatPlugin extends Plugin {
                 selTo.ch = Math.max(selFrom.ch, selTo.ch - removedBeforeEnd);
             }
             logDev('Uncommented marker pair encompassing selection', { from, to, pairToRemove, removedBeforeStart, removedBeforeEnd, selFrom, selTo });
-            // If just a cursor, set cursor (no selection), else set selection
-            if (from.line === to.line && from.ch === to.ch) {
-                editor.setCursor(selFrom);
+            // If just a cursor or word under cursor, set cursor (no selection), else set selection
+            if ((from.line === to.line && from.ch === to.ch) || (wordBounds && from.line === to.line && from.ch === wordBounds?.start && to.ch === wordBounds?.end)) {
+                // Place cursor at original offset within the word/text, accounting for removed chars before cursor
+                let cursorCh;
+                if (offsetInWord !== null && wordBounds) {
+                    // Place at same offset in word after uncommenting
+                    cursorCh = wordBounds.start + offsetInWord - (removedBeforeStart || 0);
+                } else {
+                    cursorCh = from.ch - (removedBeforeStart || 0);
+                }
+                editor.setCursor({ line: from.line, ch: Math.max(0, cursorCh) });
             } else {
                 editor.setSelection(selFrom, selTo);
             }
@@ -366,9 +400,14 @@ export default class CommentFormatPlugin extends Plugin {
         const commented = normStart + ' ' + selText + ' ' + normEnd;
         editor.replaceRange(commented, from, to);
         const startMarkerLen = normStart.length + 1; // +1 for space after start
-        if (from.line === to.line && from.ch === to.ch) {
-            // Cursor only: place cursor between the spaces
-            const cursorCh = from.ch + startMarkerLen;
+        if ((from.line === to.line && from.ch === to.ch) || (wordBounds && from.line === to.line && from.ch === wordBounds.start && to.ch === wordBounds.end)) {
+            // Cursor only or word under cursor: place cursor at same offset in word as before
+            let cursorCh;
+            if (offsetInWord !== null) {
+                cursorCh = from.ch + startMarkerLen + offsetInWord;
+            } else {
+                cursorCh = from.ch + startMarkerLen;
+            }
             editor.setCursor({ line: from.line, ch: cursorCh });
         } else {
             // Selection: select the commented region
