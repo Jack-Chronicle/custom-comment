@@ -410,52 +410,24 @@ export default class CommentFormatPlugin extends Plugin {
                 if (end.ch > 0 && endLineText[end.ch - 1] === ' ') {
                     endSpace = 1;
                 }
-                // Calculate how many characters to shift selection start/end
-                let removedBeforeStartLine = 0;
-                let removedBeforeEndLine = 0;
-                let removedWithinEndLine = 0;
-                // If marker is on the same line as selection start
-                if (start.line === from.line) {
-                    if (start.ch < from.ch) {
-                        removedBeforeStartLine += normStart.length + startSpace;
-                    } else if (start.ch >= from.ch && start.ch < to.ch && from.line === to.line) {
-                        removedWithinEndLine += normStart.length + startSpace;
-                    }
-                }
-                // If marker is on the same line as selection end
-                if (end.line === to.line) {
-                    if (end.ch < to.ch) {
-                        removedBeforeEndLine += normEnd.length + endSpace;
-                    } else if (end.ch >= from.ch && end.ch < to.ch && from.line === to.line) {
-                        removedWithinEndLine += normEnd.length + endSpace;
-                    }
-                }
-                // Track removed characters per line (before and within selection)
-                const removedBefore: Record<number, number> = {};
-                const removedWithin: Record<number, number> = {};
-                // Start marker
+                // Count all marker removals before selection start/end on their lines
+                let removedBeforeStart = 0;
+                let removedBeforeEnd = 0;
+                // Check start marker on selection start line
                 if (start.line === from.line && start.ch < from.ch) {
-                    removedBefore[start.line] = (removedBefore[start.line] || 0) + normStart.length + startSpace;
-                } else if (start.line === to.line && start.ch < to.ch) {
-                    // If start marker is on the end line and before end
-                    removedBefore[start.line] = (removedBefore[start.line] || 0) + normStart.length + startSpace;
-                } else if (start.line > from.line && start.line < to.line) {
-                    // Marker is within selection, on a line between start and end
-                    removedWithin[start.line] = (removedWithin[start.line] || 0) + normStart.length + startSpace;
-                } else if (start.line === from.line && start.ch >= from.ch && (from.line === to.line ? start.ch < to.ch : true)) {
-                    // Marker is within selection on start line
-                    removedWithin[start.line] = (removedWithin[start.line] || 0) + normStart.length + startSpace;
+                    removedBeforeStart += normStart.length + startSpace;
                 }
-                // End marker
+                // Check end marker on selection start line (rare, but possible)
+                if (end.line === from.line && end.ch < from.ch) {
+                    removedBeforeStart += normEnd.length + endSpace;
+                }
+                // Check start marker on selection end line
+                if (start.line === to.line && start.ch < to.ch) {
+                    removedBeforeEnd += normStart.length + startSpace;
+                }
+                // Check end marker on selection end line
                 if (end.line === to.line && end.ch < to.ch) {
-                    removedBefore[end.line] = (removedBefore[end.line] || 0) + normEnd.length + endSpace;
-                } else if (end.line === from.line && end.ch < from.ch) {
-                    removedBefore[end.line] = (removedBefore[end.line] || 0) + normEnd.length + endSpace;
-                } else if (end.line > from.line && end.line < to.line) {
-                    removedWithin[end.line] = (removedWithin[end.line] || 0) + normEnd.length + endSpace;
-                } else if (end.line === to.line && end.ch >= from.ch && (from.line === to.line ? end.ch < to.ch : true)) {
-                    // Marker is within selection on end line
-                    removedWithin[end.line] = (removedWithin[end.line] || 0) + normEnd.length + endSpace;
+                    removedBeforeEnd += normEnd.length + endSpace;
                 }
                 editor.transaction({
                     changes: [
@@ -466,23 +438,13 @@ export default class CommentFormatPlugin extends Plugin {
                 // Adjust selection
                 let selFrom = { ...from };
                 let selTo = { ...to };
-                if (removedBefore[selFrom.line]) {
-                    selFrom.ch = Math.max(0, selFrom.ch - removedBefore[selFrom.line]);
+                if (removedBeforeStart && selFrom.line === from.line) {
+                    selFrom.ch = Math.max(0, selFrom.ch - removedBeforeStart);
                 }
-                if (removedBefore[selTo.line] || removedWithin[selTo.line]) {
-                    selTo.ch = Math.max(selFrom.ch, selTo.ch - (removedBefore[selTo.line] || 0) - (removedWithin[selTo.line] || 0));
+                if (removedBeforeEnd && selTo.line === to.line) {
+                    selTo.ch = Math.max(selFrom.ch, selTo.ch - removedBeforeEnd);
                 }
-                // For debugging: collect removed character details
-                const removedCharsLog: Array<{ line: number, type: 'before' | 'within', count: number }> = [];
-                for (const lineStr in removedBefore) {
-                    const line = Number(lineStr);
-                    removedCharsLog.push({ line, type: 'before', count: removedBefore[line] });
-                }
-                for (const lineStr in removedWithin) {
-                    const line = Number(lineStr);
-                    removedCharsLog.push({ line, type: 'within', count: removedWithin[line] });
-                }
-                logDev('Uncommented marker pair encompassing selection', { from, to, pairToRemove, removedBefore, removedWithin, selFrom, selTo, removedCharsLog });
+                logDev('Uncommented marker pair encompassing selection', { from, to, pairToRemove, removedBeforeStart, removedBeforeEnd, selFrom, selTo });
                 editor.setSelection(selFrom, selTo);
                 return;
             }
