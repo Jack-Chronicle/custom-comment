@@ -22,6 +22,7 @@ import { searchMarkerInLine } from './utils/searchMarkerInLine';
 import { isRegionCommented } from './utils/isRegionCommented';
 import { detectFallback } from './utils/detectFallback';
 import { getWordBounds } from './utils/getWordBounds';
+import { getSelectionRange } from './utils/getSelectionRange';
 
 // DEV logging utility: only logs if __DEV__ is true (set by esbuild)
 declare const __DEV__: boolean;
@@ -211,10 +212,8 @@ export default class CommentFormatPlugin extends Plugin {
         // fallback style detection
 
         // 3. Mode Decision
-        const selection = editor.getSelection();
+        const { from, to, selection } = getSelectionRange(editor);
         const cursor = editor.getCursor();
-        let from = editor.getCursor("from");
-        let to = editor.getCursor("to");
         let line = editor.getLine(cursor.line);
         let text: string;
         let wordBounds: { start: number, end: number } | null = null;
@@ -224,12 +223,11 @@ export default class CommentFormatPlugin extends Plugin {
             wordBounds = getWordBounds(line, cursor.ch);
             if (wordBounds && cursor.ch > wordBounds.start && cursor.ch < wordBounds.end) {
                 text = line.slice(wordBounds.start, wordBounds.end);
-                from = { line: cursor.line, ch: wordBounds.start };
-                to = { line: cursor.line, ch: wordBounds.end };
+                from.line = cursor.line; from.ch = wordBounds.start;
+                to.line = cursor.line; to.ch = wordBounds.end;
             } else {
                 text = '';
-                from = { line: cursor.line, ch: cursor.ch };
-                to = { line: cursor.line, ch: cursor.ch };
+                // from and to already set to cursor position
             }
         }
 
@@ -245,138 +243,146 @@ export default class CommentFormatPlugin extends Plugin {
         const foundEnd = findMarkerInText(normEnd, text);
         logDev('[Detection] foundStart:', foundStart);
         logDev('[Detection] foundEnd:', foundEnd);
-        if (selection) {
-            // Find all start and end marker positions in the entire document
-            const markerStarts = [];
-            const markerEnds = [];
-            const lineCount = editor.lineCount();
-            for (let i = 0; i < lineCount; i++) {
-                const lineText = editor.getLine(i);
-                let idx = 0;
-                while ((idx = lineText.indexOf(normStart, idx)) !== -1) {
-                    markerStarts.push({ line: i, ch: idx });
-                    idx += normStart.length;
-                }
-                idx = 0;
-                while ((idx = lineText.indexOf(normEnd, idx)) !== -1) {
-                    markerEnds.push({ line: i, ch: idx });
-                    idx += normEnd.length;
-                }
+        // Always run toggling logic, even for just a cursor
+        // Find all start and end marker positions in the entire document
+        const markerStarts = [];
+        const markerEnds = [];
+        const lineCount = editor.lineCount();
+        for (let i = 0; i < lineCount; i++) {
+            const lineText = editor.getLine(i);
+            let idx = 0;
+            while ((idx = lineText.indexOf(normStart, idx)) !== -1) {
+                markerStarts.push({ line: i, ch: idx });
+                idx += normStart.length;
             }
-            // Find the marker pair that encompasses the selection (fully or partially overlaps)
-            let pairToRemove = null;
-            // Use stack to ensure correct matching of start/end pairs
-            const stack: { line: number, ch: number }[] = [];
-            for (let i = 0, s = 0, e = 0; i < markerStarts.length + markerEnds.length;) {
-                let nextStart = s < markerStarts.length ? markerStarts[s] : null;
-                let nextEnd = e < markerEnds.length ? markerEnds[e] : null;
-                let isStart = false;
-                if (nextStart && (!nextEnd || nextStart.line < nextEnd.line || (nextStart.line === nextEnd.line && nextStart.ch < nextEnd.ch))) {
-                    stack.push(nextStart);
-                    s++;
-                    isStart = true;
-                } else if (nextEnd) {
-                    if (stack.length > 0) {
-                        const start = stack.pop();
-                        if (start) { // Type guard for start
-                            const end = nextEnd;
-                            // Marker region
-                            const markerRegionStart = { line: start.line, ch: start.ch };
-                            const markerRegionEnd = { line: end.line, ch: end.ch + normEnd.length };
-                            // Selection must be fully or partially within the marker region (overlap)
-                            const selStart = from;
-                            const selEnd = to;
-                            const selectionWithinMarker =
-                                (selStart.line < markerRegionEnd.line || (selStart.line === markerRegionEnd.line && selStart.ch < markerRegionEnd.ch)) &&
-                                (selEnd.line > markerRegionStart.line || (selEnd.line === markerRegionStart.line && selEnd.ch > markerRegionStart.ch));
-                            const selectionCompletelyBefore =
-                                (selEnd.line < markerRegionStart.line) ||
-                                (selEnd.line === markerRegionStart.line && selEnd.ch <= markerRegionStart.ch);
-                            const selectionCompletelyAfter =
-                                (selStart.line > markerRegionEnd.line) ||
-                                (selStart.line === markerRegionEnd.line && selStart.ch >= markerRegionEnd.ch);
-                            if (selectionWithinMarker && !selectionCompletelyBefore && !selectionCompletelyAfter) {
-                                pairToRemove = { start, end };
-                                break;
-                            }
+            idx = 0;
+            while ((idx = lineText.indexOf(normEnd, idx)) !== -1) {
+                markerEnds.push({ line: i, ch: idx });
+                idx += normEnd.length;
+            }
+        }
+        // Find the marker pair that encompasses the selection (fully or partially overlaps)
+        let pairToRemove = null;
+        // Use stack to ensure correct matching of start/end pairs
+        const stack: { line: number, ch: number }[] = [];
+        for (let i = 0, s = 0, e = 0; i < markerStarts.length + markerEnds.length;) {
+            let nextStart = s < markerStarts.length ? markerStarts[s] : null;
+            let nextEnd = e < markerEnds.length ? markerEnds[e] : null;
+            let isStart = false;
+            if (nextStart && (!nextEnd || nextStart.line < nextEnd.line || (nextStart.line === nextEnd.line && nextStart.ch < nextEnd.ch))) {
+                stack.push(nextStart);
+                s++;
+                isStart = true;
+            } else if (nextEnd) {
+                if (stack.length > 0) {
+                    const start = stack.pop();
+                    if (start) { // Type guard for start
+                        const end = nextEnd;
+                        // Marker region
+                        const markerRegionStart = { line: start.line, ch: start.ch };
+                        const markerRegionEnd = { line: end.line, ch: end.ch + normEnd.length };
+                        // Selection must be fully or partially within the marker region (overlap)
+                        const selStart = from;
+                        const selEnd = to;
+                        const selectionWithinMarker =
+                            (selStart.line < markerRegionEnd.line || (selStart.line === markerRegionEnd.line && selStart.ch < markerRegionEnd.ch)) &&
+                            (selEnd.line > markerRegionStart.line || (selEnd.line === markerRegionStart.line && selEnd.ch > markerRegionStart.ch));
+                        const selectionCompletelyBefore =
+                            (selEnd.line < markerRegionStart.line) ||
+                            (selEnd.line === markerRegionStart.line && selEnd.ch <= markerRegionStart.ch);
+                        const selectionCompletelyAfter =
+                            (selStart.line > markerRegionEnd.line) ||
+                            (selStart.line === markerRegionEnd.line && selStart.ch >= markerRegionEnd.ch);
+                        if (selectionWithinMarker && !selectionCompletelyBefore && !selectionCompletelyAfter) {
+                            pairToRemove = { start, end };
+                            break;
                         }
                     }
-                    e++;
-                } else {
-                    break;
                 }
+                e++;
+            } else {
+                break;
             }
-            if (pairToRemove) {
-                // Remove the marker pair in a single transaction so undo restores both
-                const { start, end } = pairToRemove;
-                let startSpace = 0;
-                const startLineText = editor.getLine(start.line);
-                if (startLineText[start.ch + normStart.length] === ' ') {
-                    startSpace = 1;
-                }
-                let endSpace = 0;
-                const endLineText = editor.getLine(end.line);
-                if (end.ch > 0 && endLineText[end.ch - 1] === ' ') {
-                    endSpace = 1;
-                }
-                // Count all marker removals before selection start/end on their lines
-                let removedBeforeStart = 0;
-                let removedBeforeEnd = 0;
-                // Check start marker on selection start line
-                if (start.line === from.line && start.ch < from.ch) {
-                    removedBeforeStart += normStart.length + startSpace;
-                }
-                // Check end marker on selection start line (rare, but possible)
-                if (end.line === from.line && end.ch < from.ch) {
-                    removedBeforeStart += normEnd.length + endSpace;
-                }
-                // Check start marker on selection end line
-                if (start.line === to.line && start.ch < to.ch) {
-                    removedBeforeEnd += normStart.length + startSpace;
-                }
-                // Check end marker on selection end line
-                if (end.line === to.line && end.ch < to.ch) {
-                    removedBeforeEnd += normEnd.length + endSpace;
-                }
-                editor.transaction({
-                    changes: [
-                        { from: { line: end.line, ch: end.ch - endSpace }, to: { line: end.line, ch: end.ch + normEnd.length }, text: '' },
-                        { from: { line: start.line, ch: start.ch }, to: { line: start.line, ch: start.ch + normStart.length + startSpace }, text: '' }
-                    ]
-                });
-                // Adjust selection
-                let selFrom = { ...from };
-                let selTo = { ...to };
-                if (removedBeforeStart && selFrom.line === from.line) {
-                    selFrom.ch = Math.max(0, selFrom.ch - removedBeforeStart);
-                }
-                if (removedBeforeEnd && selTo.line === to.line) {
-                    selTo.ch = Math.max(selFrom.ch, selTo.ch - removedBeforeEnd);
-                }
-                logDev('Uncommented marker pair encompassing selection', { from, to, pairToRemove, removedBeforeStart, removedBeforeEnd, selFrom, selTo });
+        }
+        if (pairToRemove) {
+            // Remove the marker pair in a single transaction so undo restores both
+            const { start, end } = pairToRemove;
+            let startSpace = 0;
+            const startLineText = editor.getLine(start.line);
+            if (startLineText[start.ch + normStart.length] === ' ') {
+                startSpace = 1;
+            }
+            let endSpace = 0;
+            const endLineText = editor.getLine(end.line);
+            if (end.ch > 0 && endLineText[end.ch - 1] === ' ') {
+                endSpace = 1;
+            }
+            // Count all marker removals before selection start/end on their lines
+            let removedBeforeStart = 0;
+            let removedBeforeEnd = 0;
+            // Check start marker on selection start line
+            if (start.line === from.line && start.ch < from.ch) {
+                removedBeforeStart += normStart.length + startSpace;
+            }
+            // Check end marker on selection start line (rare, but possible)
+            if (end.line === from.line && end.ch < from.ch) {
+                removedBeforeStart += normEnd.length + endSpace;
+            }
+            // Check start marker on selection end line
+            if (start.line === to.line && start.ch < to.ch) {
+                removedBeforeEnd += normStart.length + startSpace;
+            }
+            // Check end marker on selection end line
+            if (end.line === to.line && end.ch < to.ch) {
+                removedBeforeEnd += normEnd.length + endSpace;
+            }
+            editor.transaction({
+                changes: [
+                    { from: { line: end.line, ch: end.ch - endSpace }, to: { line: end.line, ch: end.ch + normEnd.length }, text: '' },
+                    { from: { line: start.line, ch: start.ch }, to: { line: start.line, ch: start.ch + normStart.length + startSpace }, text: '' }
+                ]
+            });
+            // Adjust selection or cursor
+            let selFrom = { ...from };
+            let selTo = { ...to };
+            if (removedBeforeStart && selFrom.line === from.line) {
+                selFrom.ch = Math.max(0, selFrom.ch - removedBeforeStart);
+            }
+            if (removedBeforeEnd && selTo.line === to.line) {
+                selTo.ch = Math.max(selFrom.ch, selTo.ch - removedBeforeEnd);
+            }
+            logDev('Uncommented marker pair encompassing selection', { from, to, pairToRemove, removedBeforeStart, removedBeforeEnd, selFrom, selTo });
+            // If just a cursor, set cursor (no selection), else set selection
+            if (from.line === to.line && from.ch === to.ch) {
+                editor.setCursor(selFrom);
+            } else {
                 editor.setSelection(selFrom, selTo);
-                return;
             }
-            // If no marker pair was found, wrap the selection in a comment and return
-            if (selection) {
-                const selText = editor.getRange(from, to);
-                const commented = normStart + (selText ? ' ' : '') + selText + (selText ? ' ' : '') + normEnd;
-                editor.replaceRange(commented, from, to);
-                const startMarkerLen = normStart.length + (selText ? 1 : 0);
-                const selFrom = { line: from.line, ch: from.ch + startMarkerLen };
-                let selTo;
-                if (from.line === to.line) {
-                    selTo = { line: to.line, ch: to.ch + startMarkerLen };
-                } else {
-                    selTo = { line: to.line, ch: to.ch };
-                }
-                editor.setSelection(selFrom, selTo);
-                logDev('Commented region (no marker pair found)', { from, to, commented });
-                return;
-            }
-        } else {
             return;
         }
+        // If no marker pair was found, wrap the selection or cursor in a comment and return
+        const selText = editor.getRange(from, to);
+        // Always add a space after start and before end, even for cursor only
+        const commented = normStart + ' ' + selText + ' ' + normEnd;
+        editor.replaceRange(commented, from, to);
+        const startMarkerLen = normStart.length + 1; // +1 for space after start
+        if (from.line === to.line && from.ch === to.ch) {
+            // Cursor only: place cursor between the spaces
+            const cursorCh = from.ch + startMarkerLen;
+            editor.setCursor({ line: from.line, ch: cursorCh });
+        } else {
+            // Selection: select the commented region
+            const selFrom = { line: from.line, ch: from.ch + startMarkerLen };
+            let selTo;
+            if (from.line === to.line) {
+                selTo = { line: to.line, ch: to.ch + startMarkerLen };
+            } else {
+                selTo = { line: to.line, ch: to.ch };
+            }
+            editor.setSelection(selFrom, selTo);
+        }
+        logDev('Commented region (no marker pair found)', { from, to, commented });
+        return;
 
         // 5. Toggle Logic
         if (regionIsComment) {
