@@ -62,7 +62,7 @@ export default class CommentFormatPlugin extends Plugin {
 
         // Register reload marker commands command
         this.addCommand({
-            id: "reload-marker-commands",
+            id: "reload-markers",
             name: "Reload Marker Commands",
             callback: () => this.registerMarkerCommands(true)
         });
