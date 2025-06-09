@@ -7,10 +7,11 @@
   "license": "MIT",
   "main": "dist/main.js",
   "scripts": {
-    "build": "node esbuild.config.js",
-    "dev": "node esbuild.config.js --watch"
+    "build": "node esbuild.config.mjs",
+    "dev": "node esbuild.config.mjs --watch"
   },
   "devDependencies": {
+    "builtin-modules": "^5.0.0",
     "esbuild": "^0.25.5",
     "obsidian": "^1.8.7",
     "typescript": "^5.8.3"

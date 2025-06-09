@@ -86,7 +86,6 @@ export default class CommentFormatPlugin extends Plugin {
             icon: "ampersands",
             mobileOnly: true
         });
-        // Removed: auto-cleanup event registration
     }
 
     /**
@@ -120,17 +119,19 @@ export default class CommentFormatPlugin extends Plugin {
             this.settings.additionalMarkers.forEach((marker, i) => {
                 if (marker && marker.registerCommand) {
                     const id = `toggle-comment-marker-set-${i + 1}`;
+                    // Always pass a normalized marker set to toggleComment
+                    const normalizedMarker = {
+                        start: marker.start?.trim() || "%%",
+                        end: marker.end?.trim() || "%%"
+                    };
                     this.addCommand({
                         id,
                         name: (() => {
-                            const start = marker.start?.trim() || "%%";
-                            const end = marker.end?.trim() || "%%";
+                            const start = normalizedMarker.start;
+                            const end = normalizedMarker.end;
                             return `Toggle Marker ${i + 1}: (${start}|${end})`;
                         })(),
-                        checkCallback: (checking: boolean, editor?: Editor) => {
-                            if (!checking && editor) this.toggleComment(editor, marker);
-                            return true;
-                        }
+                        editorCallback: (editor: Editor) => this.toggleComment(editor, normalizedMarker)
                     });
                     this._markerCommandIds.push(id);
                 }
@@ -236,6 +237,23 @@ export default class CommentFormatPlugin extends Plugin {
         let line = editor.getLine(cursor.line);
         let text: string;
         let wordBounds: { start: number, end: number } | null = null;
+        // --- Word-only mode for selections ---
+        let adjustedFrom = { ...from };
+        let adjustedTo = { ...to };
+        if (wordOnlyMode && selection && from.line === to.line) {
+            const selLine = editor.getLine(from.line);
+            // Get word bounds at selection start
+            const startWord = getWordBounds(selLine, from.ch);
+            if (startWord && from.ch > startWord.start && from.ch < startWord.end) {
+                adjustedFrom.ch = startWord.start;
+            }
+            // Get word bounds at selection end (exclusive)
+            const endWord = getWordBounds(selLine, to.ch > 0 ? to.ch - 1 : to.ch);
+            if (endWord && to.ch > endWord.start && to.ch < endWord.end) {
+                adjustedTo.ch = endWord.end;
+            }
+            // If selection is entirely within a single word, both will be the same
+        }
         if (selection) {
             text = selection;
         } else {
@@ -253,7 +271,7 @@ export default class CommentFormatPlugin extends Plugin {
 
         // Calculate offset in word if cursor is at start, inside, or end of word and wordOnlyMode is enabled
         let offsetInWord = null;
-        if (wordOnlyMode && wordBounds && cursor.ch >= wordBounds.start && cursor.ch <= wordBounds.end) {
+        if (wordOnlyMode && !selection && wordBounds && cursor.ch >= wordBounds.start && cursor.ch <= wordBounds.end) {
             offsetInWord = cursor.ch - wordBounds.start;
         }
 
@@ -395,12 +413,51 @@ export default class CommentFormatPlugin extends Plugin {
             return;
         }
         // If no marker pair was found, wrap the selection or cursor in a comment and return
-        const selText = editor.getRange(from, to);
+        if (wordOnlyMode && selection) {
+            // --- Word-only mode for selections ---
+            // Find word bounds for selection start and end
+            const startLine = editor.getLine(from.line);
+            const endLine = editor.getLine(to.line);
+            let wordStart = from.ch;
+            let wordEnd = to.ch;
+            // Only adjust if inside a word
+            const startWord = getWordBounds(startLine, from.ch);
+            if (startWord && from.ch > startWord.start && from.ch < startWord.end) {
+                wordStart = startWord.start;
+            }
+            const endWord = getWordBounds(endLine, to.ch > 0 ? to.ch - 1 : to.ch);
+            if (endWord && to.ch > endWord.start && to.ch < endWord.end) {
+                wordEnd = endWord.end;
+            }
+            // If selection is across multiple lines, only adjust on first/last line
+            const markerFrom = { line: from.line, ch: wordStart };
+            const markerTo = { line: to.line, ch: wordEnd };
+            // Insert end marker first (so it doesn't affect start offset)
+            editor.replaceRange(' ' + normEnd, markerTo);
+            editor.replaceRange(normStart + ' ', markerFrom);
+            // Calculate how much the selection should be shifted
+            const startMarkerLen = normStart.length + 1;
+            // The selection should remain at the same offset within the word(s)
+            // So, shift both from and to forward by startMarkerLen if they are after markerFrom
+            let selFrom = { ...from };
+            let selTo = { ...to };
+            if (from.line === markerFrom.line && from.ch >= markerFrom.ch) {
+                selFrom.ch += startMarkerLen;
+            }
+            if (to.line === markerFrom.line && to.ch >= markerFrom.ch) {
+                selTo.ch += startMarkerLen;
+            }
+            editor.setSelection(selFrom, selTo);
+            logDev('Commented region (word-only mode)', { from, to, markerFrom, markerTo });
+            return;
+        }
+        // Use adjustedFrom/adjustedTo for word-only mode selection
+        const selText = editor.getRange(adjustedFrom, adjustedTo);
         // Always add a space after start and before end, even for cursor only
         const commented = normStart + ' ' + selText + ' ' + normEnd;
-        editor.replaceRange(commented, from, to);
+        editor.replaceRange(commented, adjustedFrom, adjustedTo);
         const startMarkerLen = normStart.length + 1; // +1 for space after start
-        if ((from.line === to.line && from.ch === to.ch) || (wordBounds && from.line === to.line && from.ch === wordBounds.start && to.ch === wordBounds.end)) {
+        if (!selection && (from.line === to.line && from.ch === to.ch) || (wordBounds && from.line === to.line && from.ch === wordBounds?.start && to.ch === wordBounds?.end)) {
             // Cursor only or word under cursor: place cursor at same offset in word as before
             let cursorCh;
             if (offsetInWord !== null) {
@@ -409,18 +466,25 @@ export default class CommentFormatPlugin extends Plugin {
                 cursorCh = from.ch + startMarkerLen;
             }
             editor.setCursor({ line: from.line, ch: cursorCh });
+        } else if (selection && wordOnlyMode && from.line === to.line) {
+            // Selection in word-only mode: preserve selection's relative position
+            const relStart = from.ch - adjustedFrom.ch;
+            const relEnd = to.ch - adjustedFrom.ch;
+            const selFrom = { line: from.line, ch: adjustedFrom.ch + startMarkerLen + relStart };
+            const selTo = { line: to.line, ch: adjustedFrom.ch + startMarkerLen + relEnd };
+            editor.setSelection(selFrom, selTo);
         } else {
             // Selection: select the commented region
-            const selFrom = { line: from.line, ch: from.ch + startMarkerLen };
+            const selFrom = { line: adjustedFrom.line, ch: adjustedFrom.ch + startMarkerLen };
             let selTo;
-            if (from.line === to.line) {
-                selTo = { line: to.line, ch: to.ch + startMarkerLen };
+            if (adjustedFrom.line === adjustedTo.line) {
+                selTo = { line: adjustedTo.line, ch: adjustedTo.ch + startMarkerLen };
             } else {
-                selTo = { line: to.line, ch: to.ch };
+                selTo = { line: adjustedTo.line, ch: adjustedTo.ch };
             }
             editor.setSelection(selFrom, selTo);
         }
-        logDev('Commented region (no marker pair found)', { from, to, commented });
+        logDev('Commented region (no marker pair found)', { from, to, adjustedFrom, adjustedTo, commented });
         return;
 
         // 5. Toggle Logic
