@@ -17,6 +17,13 @@ Lets you customize your comment syntax/formats in Obsidian.
 
 ## Installation
 
+### BRAT (Beta Reviewers Auto-update Tester)
+
+1. Install the [BRAT plugin](https://github.com/TfTHacker/obsidian42-brat) in Obsidian.
+2. In BRAT settings, add this repository's URL as a beta plugin:  
+   `https://github.com/Jack-Chronicle/custom-comment`
+3. BRAT will handle installing and updating the plugin automatically.
+
 ### Manual Installation
 
 1. Download the `main.js` and `manifest.json` files from the Releases page
@@ -25,7 +32,7 @@ Lets you customize your comment syntax/formats in Obsidian.
 
 ### Community Plugins
 
-- Currently Working on apporval
+- Currently Working on approval
 <!-- Open the Community Plugins tab in the settings and search for "Custom Comments" -->
 
 ## Usage
