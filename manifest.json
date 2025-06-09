@@ -1,7 +1,7 @@
 {
   "id": "custom-comment",
   "name": "Custom Comments",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "minAppVersion": "0.15.0",
   "description": "Lets you customize your comment syntax/formats.",
   "main": "dist/main.js",
