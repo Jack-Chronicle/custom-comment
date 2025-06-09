@@ -118,6 +118,5 @@ jobs:
           files: |
             dist/main.js
             manifest.json
-            package.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
