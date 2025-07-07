@@ -35,11 +35,11 @@ const isDev = process.env.npm_lifecycle_event === "dev";
 const defaultOptions = {
     outdir: "dist",
     bundle: true,
-    external: ["obsidian"],
+    external: ["obsidian"], // mutable array, no 'as const'
     target: "es2020",
-    format: "cjs",
-    platform: "node",
-    logLevel: "info",
+    format: /** @type {'cjs'} */ ('cjs'), // JSDoc type annotation for compatibility
+    platform: /** @type {'node'} */ ('node'), // JSDoc type annotation for compatibility
+    logLevel: /** @type {'info'} */ ('info'), // JSDoc type annotation for compatibility
     sourcemap: true,
     treeShaking: true,
     minify: true,
@@ -62,13 +62,14 @@ try {
 }
 
 if (devCopy === 1) {
-    esbuild.build(buildOptions).then(copyDevBuild);
+    esbuild.build(buildOptions).then(() => { if (copyDevBuild) copyDevBuild(); });
     if (process.env.npm_lifecycle_event === "dev") {
         (async () => {
             const ctx = await esbuild.context(buildOptions);
-            await ctx.watch();
+            await ctx.watch((error, result) => {
+                if (copyDevBuild) copyDevBuild();
+            });
             console.log("Watching for changes...");
-            ctx.onEnd(copyDevBuild);
         })();
     }
 } else {

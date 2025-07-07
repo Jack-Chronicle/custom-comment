@@ -60,13 +60,6 @@ export default class CommentFormatPlugin extends Plugin {
         await this.loadSettings();
         this.addSettingTab(new CommentFormatSettingTab(this.app, this));
 
-        // Register reload marker commands command
-        this.addCommand({
-            id: "reload-markers",
-            name: "Reload Marker Commands",
-            callback: () => this.registerMarkerCommands(true)
-        });
-
         this.registerMarkerCommands();
         // Register mobile toolbar command for main toggle
         let toolbarTemplate = this.settings.template ?? "%% {cursor} %%";
@@ -81,19 +74,22 @@ export default class CommentFormatPlugin extends Plugin {
         const toolbarLabel = `${toolbarBefore}${toolbarBefore ? ' ' : ''}|${toolbarAfter ? ' ' : ''}${toolbarAfter}`.trim();
         this.addCommand({
             id: "toggle-comment-toolbar",
-            name: `Toggle Comment: (${toolbarLabel})`,
+            name: `Toggle comment: (${toolbarLabel})`,
             editorCallback: (editor: Editor) => this.toggleComment(editor),
             icon: "ampersands",
-            mobileOnly: true
+            mobileOnly: false
         });
     }
 
     /**
-     * Registers all marker commands (main + enabled additional marker sets). If force is true, re-registers all.
+     * Registers all marker commands (main + enabled additional marker sets).
      */
-    registerMarkerCommands(force = false) {
-        if (force && this._markerCommandIds) {
-            this._markerCommandIds = [];
+    registerMarkerCommands() {
+        // Remove all previously registered marker commands
+        if (Array.isArray(this._markerCommandIds)) {
+            for (const id of this._markerCommandIds) {
+                this.removeCommand?.(id);
+            }
         }
         this._markerCommandIds = [];
 
@@ -106,19 +102,12 @@ export default class CommentFormatPlugin extends Plugin {
             before = mainTemplate.slice(0, cursorIndex).trim() || "%%";
             after = mainTemplate.slice(cursorIndex + "{cursor}".length).trim() || "%%";
         }
-        const mainId = "toggle-comment-template";
-        this.addCommand({
-            id: mainId,
-            name: `Toggle Comment: (${before}|${after})`,
-            editorCallback: (editor: Editor) => this.toggleComment(editor)
-        });
-        this._markerCommandIds.push(mainId);
 
         // Register additional marker commands if enabled
         if (Array.isArray(this.settings.additionalMarkers)) {
             this.settings.additionalMarkers.forEach((marker, i) => {
+                const id = `toggle-comment-marker-set-${i + 1}`;
                 if (marker && marker.registerCommand) {
-                    const id = `toggle-comment-marker-set-${i + 1}`;
                     // Always pass a normalized marker set to toggleComment
                     const normalizedMarker = {
                         start: marker.start?.trim() || "%%",
@@ -129,11 +118,14 @@ export default class CommentFormatPlugin extends Plugin {
                         name: (() => {
                             const start = normalizedMarker.start;
                             const end = normalizedMarker.end;
-                            return `Toggle Marker ${i + 1}: (${start}|${end})`;
+                            return `Toggle marker ${i + 1}: (${start}|${end})`;
                         })(),
                         editorCallback: (editor: Editor) => this.toggleComment(editor, normalizedMarker)
                     });
                     this._markerCommandIds.push(id);
+                } else {
+                    // If command exists but should not, ensure it is removed
+                    this.removeCommand?.(id);
                 }
             });
         }
