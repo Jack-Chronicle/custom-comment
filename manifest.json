@@ -3,7 +3,7 @@
   "name": "Custom Comments",
   "version": "0.2.6",
   "minAppVersion": "0.15.0",
-  "description": "Lets you customize your comment syntax/formats.",
+  "description": "Adds a method to create custom methods to enclose comments",
   "author": "Jack Chronicle",
   "authorUrl": "https://github.com/Jack-Chronicle",
   "isDesktopOnly": false
