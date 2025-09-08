@@ -1,6 +1,6 @@
 # Custom Comments
 
-Adds a method to create custom methods to enclose comments.
+Adds a method to create custom keyboard shortcuts that enclose comments.
 
 ## Features
 
