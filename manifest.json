@@ -3,7 +3,7 @@
   "name": "Custom Comments",
   "version": "0.2.7",
   "minAppVersion": "0.15.0",
-  "description": "Adds a method to create custom methods to enclose comments",
+  "description": "Adds a method to create custom keyboard shortcuts that enclose comments.",
   "author": "Jack Chronicle",
   "authorUrl": "https://github.com/Jack-Chronicle",
   "isDesktopOnly": false

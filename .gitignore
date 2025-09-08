@@ -20,6 +20,7 @@ Thumbs.db
 # Environment/config
 .env
 .dev-copy.mjs
+.gitconfig
 
 # Log files
 npm-debug.log*
