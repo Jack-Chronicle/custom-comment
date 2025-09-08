@@ -1,6 +1,6 @@
 # Custom Comments
 
-Lets you customize your comment syntax/formats in Obsidian.
+Adds a method to create custom methods to enclose comments.
 
 ## Features
 
