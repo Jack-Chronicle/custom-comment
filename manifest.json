@@ -1,7 +1,7 @@
 {
   "id": "custom-comment",
   "name": "Custom Comments",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "minAppVersion": "0.15.0",
   "description": "Adds a method to create custom keyboard shortcuts that enclose comments.",
   "author": "Jack Chronicle",
